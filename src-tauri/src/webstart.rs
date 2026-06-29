@@ -458,8 +458,18 @@ fn download_jars(
     let total = to_download.len();
     for (i, task) in to_download.iter().enumerate() {
         let mut resp = client.get(&task.url).send()?;
-        let mut f = File::create(&task.file_path)?;
-        resp.copy_to(&mut f)?;
+        // Download to a temp file then rename, so a truncated download never
+        // leaves a usable (partial) jar to be put on the classpath next launch.
+        // The classpath scan only picks `.jar`, so an orphaned `.part` is ignored.
+        let mut tmp = task.file_path.clone().into_os_string();
+        tmp.push(".part");
+        let tmp = PathBuf::from(tmp);
+        {
+            let mut f = File::create(&tmp)?;
+            resp.copy_to(&mut f)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &task.file_path)?;
         let _ = on_progress.send(serde_json::json!({
             "message": format!("Downloaded ({}/{})", i + 1, total),
         }));
@@ -638,7 +648,7 @@ fn has_file_changed(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> Result<
     }
     if let Some(hash_in_jnlp) = hash_in_jnlp {
         if let Some(current_hash) = sha256_of_file(jar_file_path) {
-            return Ok(hash_in_jnlp != &current_hash);
+            return Ok(hash_in_jnlp != current_hash.as_str());
         }
     }
     Ok(false)
@@ -646,8 +656,35 @@ fn has_file_changed(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use crate::webstart::normalize_url;
+    use super::{get_file_name_from_path, is_safe_basename, normalize_url, sanitize_for_path};
     use anyhow::Error;
+
+    #[test]
+    fn sanitize_for_path_strips_traversal() {
+        assert_eq!(sanitize_for_path("../../etc"), "etc");
+        assert_eq!(sanitize_for_path("..\\..\\x"), "x");
+        assert_eq!(sanitize_for_path("Open Integration Engine"), "open-integration-engine");
+        assert_eq!(sanitize_for_path("a.b.c"), "a_b_c");
+        let s = sanitize_for_path("foo/../bar");
+        assert!(!s.contains('/') && !s.contains('\\'));
+    }
+
+    #[test]
+    fn basename_splits_both_separators() {
+        assert_eq!(get_file_name_from_path("a/b/c.jar"), "c.jar");
+        assert_eq!(get_file_name_from_path("a\\b\\c.jar"), "c.jar");
+        assert_eq!(get_file_name_from_path("plain.jar"), "plain.jar");
+    }
+
+    #[test]
+    fn is_safe_basename_rejects_traversal() {
+        assert!(is_safe_basename("core.jar"));
+        assert!(!is_safe_basename(""));
+        assert!(!is_safe_basename("."));
+        assert!(!is_safe_basename(".."));
+        assert!(!is_safe_basename("a/b"));
+        assert!(!is_safe_basename("a\\b"));
+    }
 
     #[test]
     pub fn test_normalize_url() -> Result<(), Error> {

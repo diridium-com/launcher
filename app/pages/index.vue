@@ -74,9 +74,17 @@ const sortedServers = computed(() => {
 
 const isGrouped = computed(() => sortBy.value === "group")
 
-const mappedServers = computed(() =>
-  Object.groupBy(filteredServers.value, ({ group }) => group),
-)
+// Manual group instead of Object.groupBy, which isn't available on older
+// WebKitGTK / WebView2 and would crash the grouped view there. Null prototype
+// keeps the same semantics (no collisions with Object.prototype keys).
+const mappedServers = computed<Record<string, Connection[]>>(() => {
+  const groups: Record<string, Connection[]> = Object.create(null)
+  for (const server of filteredServers.value) {
+    if (!groups[server.group]) groups[server.group] = []
+    groups[server.group].push(server)
+  }
+  return groups
+})
 
 const collapsedGroups = reactive<Set<string>>(
   new Set(JSON.parse(localStorage.getItem("launcher-collapsed-groups") || "[]")),

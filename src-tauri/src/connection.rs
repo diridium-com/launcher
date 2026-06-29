@@ -12,7 +12,6 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -294,62 +293,19 @@ impl ConnectionStore {
     }
 }
 
+/// Default `java_home` for a new connection. Use JAVA_HOME if set, otherwise
+/// leave it empty so the launch falls back to `java` on PATH. We deliberately do
+/// not guess a JDK per platform: the old guesses were wrong (macOS pinned Java
+/// 8, Windows picked up the System32 stub) and the standard mechanisms are more
+/// reliable. The user can still set java_home per connection in the editor.
 pub fn find_java_home() -> String {
-    let mut java_home = String::new();
-    if let Some(jh) = OS_ENV.var_os("JAVA_HOME") {
-        if let Some(jh_str) = jh.to_str() {
-            java_home = String::from(jh_str);
-            info!("JAVA_HOME is set to {}", java_home);
-        } else {
-            warn!("JAVA_HOME contains non-UTF-8 characters, ignoring");
+    match OS_ENV.var_os("JAVA_HOME").and_then(|jh| jh.to_str().map(String::from)) {
+        Some(jh) => {
+            info!("JAVA_HOME is set to {}", jh);
+            jh
         }
+        None => String::new(),
     }
-
-    #[cfg(target_os = "macos")]
-    if java_home.is_empty() {
-        let out = Command::new("/usr/libexec/java_home")
-            .args(["-v", "1.8"])
-            .output();
-        if let Ok(out) = out {
-            if out.status.success() {
-                match String::from_utf8(out.stdout) {
-                    Ok(jh) => {
-                        info!("/usr/libexec/java_home -v 1.8 returned {}", jh);
-                        java_home = jh.trim().to_string();
-                    }
-                    Err(e) => {
-                        warn!("java_home output was not valid UTF-8: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    if java_home.is_empty() {
-        let out = Command::new("where")
-            .arg("java")
-            .output();
-        if let Ok(out) = out {
-            if out.status.success() {
-                if let Ok(paths) = String::from_utf8(out.stdout) {
-                    if let Some(first) = paths.lines().next() {
-                        let java_path = PathBuf::from(first.trim());
-                        if let Some(bin_dir) = java_path.parent() {
-                            if let Some(home_dir) = bin_dir.parent() {
-                                if let Some(home_str) = home_dir.to_str() {
-                                    info!("derived JAVA_HOME from PATH: {}", home_str);
-                                    java_home = home_str.to_string();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    java_home
 }
 
 fn get_default_group() -> String {

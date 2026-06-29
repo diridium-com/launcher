@@ -11,7 +11,6 @@ use std::process::exit;
 use std::sync::Arc;
 
 use log::{info, warn};
-use serde_json::Number;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -63,7 +62,7 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
         Err(e) => {
             let msg = format!("Could not reach {}: {}", address, e);
             warn!("{}", msg);
-            return Ok(create_json_resp(-1, &msg));
+            return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
         }
     };
     match &pin {
@@ -102,7 +101,7 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
             Err(e) => {
                 let msg = e.to_string();
                 warn!("{}", msg);
-                return Ok(create_json_resp(-1, &msg));
+                return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
             }
             Ok(wf) => {
                 let wf = Arc::new(wf);
@@ -147,11 +146,11 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
     if let Err(e) = r {
         let msg = e.to_string();
         warn!("{}", msg);
-        return Ok(create_json_resp(-1, &msg));
+        return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
     }
 
     let _ = cs.update_last_connected(&id);
-    Ok(String::from("{\"code\": 0}"))
+    Ok(serde_json::json!({ "code": 0 }).to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -285,19 +284,6 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-fn create_json_resp(code: i32, msg: &str) -> String {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "code".to_string(),
-        serde_json::Value::Number(Number::from(code)),
-    );
-    obj.insert(
-        "msg".to_string(),
-        serde_json::Value::String(String::from(msg)),
-    );
-    serde_json::to_string(&obj).unwrap_or_default()
 }
 
 /// Build a valid, unique Tauri window label for a connection's console.

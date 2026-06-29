@@ -53,11 +53,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-targets }}
+          components: clippy
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+
+      - name: Rust tests and lint (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: |
+          cargo test --locked
+          cargo clippy --locked -- -D warnings
 
       - name: Sync node version and setup cache
         uses: actions/setup-node@v4
