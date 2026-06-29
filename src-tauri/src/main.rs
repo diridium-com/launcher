@@ -39,6 +39,18 @@ async fn get_launcher_info() -> String {
 async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, wc: State<'_, WebstartCache>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
     let ce = cs.get(&id)
         .ok_or_else(|| format!("connection not found: {}", id))?;
+
+    // Fail fast on a missing java before any cert handshake or download.
+    let java_home = ce.java_home.clone();
+    let java_ok = tauri::async_runtime::spawn_blocking(move || webstart::check_java_available(&java_home))
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = java_ok {
+        let msg = e.to_string();
+        warn!("{}", msg);
+        return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
+    }
+
     let cache_dir = cs.cache_dir.clone();
     let logs_dir = cs.logs_dir.clone();
     let address = ce.address.clone();

@@ -371,6 +371,38 @@ impl WebstartFile {
     }
 }
 
+/// Verify the java binary the connection will use is runnable, before doing any
+/// network work. Resolves the same binary as `run()` (the connection's Java Home
+/// if set, otherwise `java` on PATH) and runs a cheap `java -version`.
+pub fn check_java_available(java_home: &str) -> Result<(), Error> {
+    let java_home = java_home.trim();
+    let java_bin = if java_home.is_empty() {
+        PathBuf::from("java")
+    } else {
+        PathBuf::from(java_home).join("bin").join("java")
+    };
+
+    let mut cmd = Command::new(&java_bin);
+    cmd.arg("-version");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    match cmd.output() {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            let location = if java_home.is_empty() {
+                "on PATH".to_string()
+            } else {
+                format!("at {}", java_bin.display())
+            };
+            Err(Error::msg(format!(
+                "Java not found {}. Set Java Home on the connection, or install/configure Java on PATH.",
+                location
+            )))
+        }
+    }
+}
+
 /// Read a child stream line by line and push each line into the console buffer.
 /// Runs on its own thread; exits at EOF or on read error. Returns the join
 /// handle so the reaper can wait for the final output before posting exit.
