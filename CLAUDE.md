@@ -38,4 +38,4 @@ cargo test
 
 ## Remotes
 
-- `origin` — `pacmano1/launcher`
+- `origin` — `pacmano1/launcher` (this project's own repo; separated from upstream `kayyagari/ballista`)
