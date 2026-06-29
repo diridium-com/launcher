@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Connection } from "~/types"
+import type { Connection, CertInfo } from "~/types"
 import { LandingScreenServerStatus } from "~/enums"
 import { Channel, invoke } from "@tauri-apps/api/core"
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http"
@@ -95,11 +95,15 @@ const hasServers = computed(() => servers.length > 0)
 const hasResults = computed(() => filteredServers.value.length > 0)
 
 const handleLaunchClick = (connection: Connection) => {
+  // Guard against double-click / rapid relaunch stacking trust modals + processes.
+  if (isLoading.value) return
   isLoading.value = true
   launchError.value = null
   progressMessage.value = "Connecting..."
   nextTick(() => launchServer(connection))
 }
+
+const { trustCertificate, confirmCertChange } = useConfirmRejectModal()
 
 const launchServer = async (connection: Connection) => {
   const onProgress = new Channel<{ message: string }>()
@@ -108,10 +112,38 @@ const launchServer = async (connection: Connection) => {
   }
 
   try {
-    await invoke("launch", {
-      id: connection.id,
-      on_progress: onProgress,
-    })
+    // Loop so a certificate trust prompt can be shown, then the launch retried.
+    // code 0 = launched, 2 = first-use trust, 3 = cert changed, else = error.
+    // Bounded so a cert that changes every handshake can't re-prompt forever.
+    let attempts = 0
+    while (true) {
+      if (attempts++ > 4) {
+        launchError.value = "Launch aborted: the server certificate keeps changing."
+        return
+      }
+      const resp = JSON.parse(
+        await invoke<string>("launch", { id: connection.id, on_progress: onProgress }),
+      )
+      if (resp.code === 0) return
+      if (resp.code === 2 || resp.code === 3) {
+        progressMessage.value = "Awaiting certificate approval..."
+        const cert = resp.cert as CertInfo
+        const approved =
+          resp.code === 2
+            ? await trustCertificate(cert)
+            : await confirmCertChange(cert, connection.pinnedCertSha256 ?? "")
+        if (!approved) {
+          launchError.value = "Launch cancelled: certificate not trusted."
+          return
+        }
+        await invoke("set_pin", { connection_id: connection.id, sha256: cert.sha256 })
+        connection.pinnedCertSha256 = cert.sha256
+        progressMessage.value = "Connecting..."
+        continue
+      }
+      launchError.value = resp.msg || `Launch failed (code ${resp.code})`
+      return
+    }
   } catch (e) {
     launchError.value = `Launch failed: ${e}`
   } finally {

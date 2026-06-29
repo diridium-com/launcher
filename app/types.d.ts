@@ -17,9 +17,19 @@ export interface Connection {
   lastConnected: number | null
   showConsole: boolean
   engineType: string
+  pinnedCertSha256: string | null
 
   // the below properties are transient and are used only in the UI
   nodeId: string
   parentId: string
+}
+
+// Server leaf certificate details shown in the trust prompt. `sha256` (hex) is
+// the value to verify out-of-band; the rest is self-asserted context.
+export interface CertInfo {
+  sha256: string
+  subject: string
+  issuer: string
+  not_after: string
 }
 

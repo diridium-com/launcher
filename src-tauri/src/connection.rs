@@ -41,6 +41,10 @@ pub struct ConnectionEntry {
     pub show_console: bool,
     #[serde(default = "get_default_engine_type", rename = "engineType")]
     pub engine_type: String,
+    /// Trusted server leaf-cert SHA-256 (hex). None = not yet trusted; the first
+    /// launch prompts the operator (TOFU). Not a secret, so it lives in the JSON.
+    #[serde(default, rename = "pinnedCertSha256")]
+    pub pinned_cert_sha256: Option<String>,
 }
 
 pub struct ConnectionStore {
@@ -67,6 +71,7 @@ impl Default for ConnectionEntry {
             last_connected: None,
             show_console: false,
             engine_type: get_default_engine_type(),
+            pinned_cert_sha256: None,
         }
     }
 }
@@ -201,13 +206,23 @@ impl ConnectionStore {
     }
 
     fn write_connections_to_disk(&self) -> Result<(), Error> {
-        let c = self.con_cache.lock().expect("connection cache lock poisoned");
-        let val = serde_json::to_string_pretty(&*c)?;
-        let mut f = File::create(&self.con_location).map_err(|e| {
-            warn!("unable to open file for writing: {}", e);
-            Error::new(e)
-        })?;
-        f.write_all(val.as_bytes())?;
+        let val = {
+            let c = self.con_cache.lock().expect("connection cache lock poisoned");
+            serde_json::to_string_pretty(&*c)?
+        };
+        // Write to a sibling temp file, fsync, then atomically rename over the
+        // target so a crash mid-write can never leave a truncated (data-losing)
+        // launcher-data.json. The lock is released before this blocking I/O.
+        let tmp = self.con_location.with_file_name("launcher-data.json.tmp");
+        {
+            let mut f = File::create(&tmp).map_err(|e| {
+                warn!("unable to open file for writing: {}", e);
+                Error::new(e)
+            })?;
+            f.write_all(val.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &self.con_location)?;
         Ok(())
     }
 
@@ -221,6 +236,19 @@ impl ConnectionStore {
                     .expect("system clock is before UNIX epoch")
                     .as_millis() as i64,
             );
+            cache.insert(id.to_string(), Arc::new(updated));
+        }
+        drop(cache);
+        self.write_connections_to_disk()?;
+        Ok(())
+    }
+
+    /// Set (or clear) a connection's pinned certificate fingerprint.
+    pub fn update_pin(&self, id: &str, sha256: Option<String>) -> Result<(), Error> {
+        let mut cache = self.con_cache.lock().expect("connection cache lock poisoned");
+        if let Some(entry) = cache.get(id) {
+            let mut updated = (**entry).clone();
+            updated.pinned_cert_sha256 = sha256;
             cache.insert(id.to_string(), Arc::new(updated));
         }
         drop(cache);

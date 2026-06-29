@@ -13,12 +13,15 @@ use std::sync::Arc;
 use log::{info, warn};
 use serde_json::Number;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::connection::{ConnectionEntry, ConnectionStore};
+use crate::console::ConsoleRegistry;
 use crate::webstart::{LoadConfig, WebstartCache, WebstartFile};
 
 mod connection;
+mod console;
+mod tls;
 mod webstart;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -34,7 +37,7 @@ async fn get_launcher_info() -> String {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, wc: State<'_, WebstartCache>) -> Result<String, String> {
+async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, wc: State<'_, WebstartCache>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
     let ce = cs.get(&id)
         .ok_or_else(|| format!("connection not found: {}", id))?;
     let cache_dir = cs.cache_dir.clone();
@@ -45,6 +48,35 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
     let donotcache = ce.donotcache;
     let engine_type = ce.engine_type.clone();
 
+    // Verify the server's TLS certificate against the connection's pin (TOFU).
+    // This runs on every launch, before any download, so the cert is re-checked
+    // even when the WebstartFile is cached.
+    let pin = ce.pinned_cert_sha256.clone();
+    let captured = tauri::async_runtime::spawn_blocking({
+        let address = address.clone();
+        move || crate::tls::capture_cert(&address)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let captured = match captured {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("Could not reach {}: {}", address, e);
+            warn!("{}", msg);
+            return Ok(create_json_resp(-1, &msg));
+        }
+    };
+    match &pin {
+        // First connect to this server: ask the operator to trust the cert.
+        None => return Ok(serde_json::json!({ "code": 2, "cert": captured }).to_string()),
+        // The cert differs from the one previously trusted.
+        Some(p) if !p.eq_ignore_ascii_case(&captured.sha256) => {
+            return Ok(serde_json::json!({ "code": 3, "cert": captured }).to_string())
+        }
+        // Matches the pin — proceed.
+        Some(_) => {}
+    }
+
     let mut ws = wc.get(&address);
     if ws.is_none() {
         let tmp = tauri::async_runtime::spawn_blocking({
@@ -52,6 +84,7 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
             let address = address.clone();
             let cache_dir = cache_dir.clone();
             let logs_dir = logs_dir.clone();
+            let pinned_cert_sha256 = pin.clone();
             move || WebstartFile::load(LoadConfig {
                 base_url: &address,
                 cache_dir: &cache_dir,
@@ -61,6 +94,7 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
                 engine_type: &engine_type,
                 logs_dir: &logs_dir,
                 on_progress: &on_progress,
+                pinned_cert_sha256,
             })
         }).await.map_err(|e| e.to_string())?;
 
@@ -79,15 +113,37 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
     }
     let ws = ws.expect("WebstartFile should be loaded at this point");
     let _ = on_progress.send(serde_json::json!({"message": "Launching administrator..."}));
-    let console_jar = if ce.show_console {
-        Some(app.path().resource_dir()
-            .map_err(|e| e.to_string())?
-            .join("lib")
-            .join("java-console.jar"))
+    let console_sink = if ce.show_console {
+        let label = console_window_label(&ce.id);
+        let buf = registry.get_or_create(&label);
+        let generation = console::reset_for_relaunch(&buf);
+
+        // Create (or focus) the console window on the main thread.
+        let app_handle = app.clone();
+        let win_label = label.clone();
+        let win_title = format!("Console — {}", ce.name);
+        app.run_on_main_thread(move || {
+            if let Some(w) = app_handle.get_webview_window(&win_label) {
+                let _ = w.set_focus();
+            } else if let Err(e) = WebviewWindowBuilder::new(
+                &app_handle,
+                win_label.as_str(),
+                WebviewUrl::default(),
+            )
+            .title(win_title)
+            .inner_size(760.0, 520.0)
+            .build()
+            {
+                warn!("failed to create console window: {}", e);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+        Some(console::ConsoleSink { buf, generation, app: app.clone(), label })
     } else {
         None
     };
-    let r = ws.run(ce, console_jar);
+    let r = ws.run(ce, console_sink);
     if let Err(e) = r {
         let msg = e.to_string();
         warn!("{}", msg);
@@ -96,6 +152,17 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
 
     let _ = cs.update_last_connected(&id);
     Ok(String::from("{\"code\": 0}"))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn set_pin(connection_id: String, sha256: String, cs: State<ConnectionStore>) -> Result<(), String> {
+    // Canonicalize so every stored pin is byte-identical to what tls::to_hex
+    // produces and the launch-time compare always agrees.
+    let pin = sha256.trim().to_ascii_lowercase();
+    if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid certificate fingerprint".to_string());
+    }
+    cs.update_pin(&connection_id, Some(pin)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -188,6 +255,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(connection_store.expect("ConnectionStore init was checked above"))
         .manage(webcache)
+        .manage(ConsoleRegistry::default())
         .invoke_handler(tauri::generate_handler![
             launch,
             import,
@@ -198,8 +266,23 @@ fn main() {
             get_all_engine_types,
             load_connections,
             load_single_connection,
-            get_launcher_info
+            get_launcher_info,
+            set_pin,
+            console::console_subscribe,
+            console::console_save
         ])
+        .on_window_event(|window, event| {
+            // When a console window closes, drop its buffer so a later relaunch
+            // starts clean instead of replaying a dead session.
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label().to_string();
+                if label.starts_with("console-") {
+                    if let Some(reg) = window.app_handle().try_state::<ConsoleRegistry>() {
+                        reg.remove(&label);
+                    }
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -215,6 +298,18 @@ fn create_json_resp(code: i32, msg: &str) -> String {
         serde_json::Value::String(String::from(msg)),
     );
     serde_json::to_string(&obj).unwrap_or_default()
+}
+
+/// Build a valid, unique Tauri window label for a connection's console.
+/// Tauri labels allow only `[a-zA-Z0-9-/:_]`; sanitize anything else. The
+/// `console-` prefix is what the frontend (app.vue) and the console capability
+/// glob (`console-*`) match on.
+fn console_window_label(conn_id: &str) -> String {
+    let sanitized: String = conn_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("console-{}", sanitized)
 }
 
 fn move_file(old: PathBuf, new: PathBuf) {

@@ -18,6 +18,9 @@
   --color-text-tertiary: #6b7280;
   --color-text-disabled: #4b5060;
 
+  /* Console log text — brighter/crisper than body text for terminal readability */
+  --color-console-text: #f4f7fd;
+
   /* Status */
   --color-status-available: #34d399;
   --color-status-unavailable: #f87171;
@@ -50,6 +53,7 @@
   --color-text-secondary: #4b5563;
   --color-text-tertiary: #6b7280;
   --color-text-disabled: #9ca3af;
+  --color-console-text: #15181f;
   --color-status-available: #22c55e;
   --color-status-unavailable: #ef4444;
   --color-status-pending: #f59e0b;

@@ -123,12 +123,35 @@ const handleDelete = async () => {
             <p class="text-sm font-medium text-text-secondary select-none">Options</p>
             <label class="flex items-center gap-2 text-sm text-text-primary hover:cursor-pointer select-none">
               <input type="checkbox" class="accent-accent" v-model="server.showConsole" />
-              Show Java console
+              Show console
             </label>
             <label class="flex items-center gap-2 text-sm text-text-primary hover:cursor-pointer select-none">
               <input type="checkbox" class="accent-accent" v-model="server.donotcache" />
               Do not cache
             </label>
+          </div>
+          <div class="space-y-2 pt-1">
+            <p class="text-sm font-medium text-text-secondary select-none">Security</p>
+            <template v-if="server.pinnedCertSha256">
+              <p class="text-xs text-text-tertiary select-none">Trusted certificate (SHA-256)</p>
+              <div class="flex items-start gap-2">
+                <p
+                  class="flex-1 font-mono text-xs bg-surface-2 rounded-md px-3 py-2 text-text-secondary break-all leading-relaxed"
+                >
+                  {{ server.pinnedCertSha256 }}
+                </p>
+                <button
+                  type="button"
+                  class="px-2.5 py-1.5 rounded-md text-xs text-danger hover:bg-danger/10 hover:cursor-pointer transition-colors whitespace-nowrap"
+                  @click="server.pinnedCertSha256 = null"
+                >
+                  Forget
+                </button>
+              </div>
+            </template>
+            <p v-else class="text-xs text-text-tertiary select-none">
+              No certificate trusted yet — you'll be asked to trust one on first connect.
+            </p>
           </div>
         </section>
       </form>

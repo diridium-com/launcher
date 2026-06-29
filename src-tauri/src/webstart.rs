@@ -3,7 +3,7 @@
 // Licensed under the MPL-2.0 License. See LICENSE file in the project root.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(windows)]
@@ -15,7 +15,7 @@ use anyhow::Error;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use log::info;
-use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::blocking::Client;
 use reqwest::Url;
 use roxmltree::Node;
 use rustc_hash::FxHashMap;
@@ -41,6 +41,9 @@ pub struct LoadConfig<'a> {
     pub engine_type: &'a str,
     pub logs_dir: &'a PathBuf,
     pub on_progress: &'a Channel<serde_json::Value>,
+    /// The connection's trusted leaf-cert SHA-256 (hex). Required here: the
+    /// launch command verifies/captures the pin before calling load().
+    pub pinned_cert_sha256: Option<String>,
 }
 
 #[derive(Debug)]
@@ -97,9 +100,13 @@ impl WebstartFile {
         let base_url = normalize_url(config.base_url)?;
         let webstart = format!("{}/webstart.jnlp", base_url);
         let _ = config.on_progress.send(serde_json::json!({"message": "Fetching server configuration..."}));
-        let client = ClientBuilder::default()
-            .danger_accept_invalid_certs(true)
-            .build()?;
+        // Download over a pinned-TLS client. The launch command guarantees the
+        // pin is present and matches the live cert before we get here.
+        let pin = config
+            .pinned_cert_sha256
+            .as_deref()
+            .ok_or_else(|| Error::msg("internal error: launch reached download with no pinned certificate"))?;
+        let client = crate::tls::pinned_client(pin)?;
 
         let r = client.get(&webstart).send()?;
         let data = r.text()?;
@@ -184,7 +191,11 @@ impl WebstartFile {
         Ok(ws)
     }
 
-    pub fn run(&self, ce: Arc<ConnectionEntry>, console_jar: Option<PathBuf>) -> Result<(), Error> {
+    pub fn run(
+        &self,
+        ce: Arc<ConnectionEntry>,
+        console: Option<crate::console::ConsoleSink>,
+    ) -> Result<(), Error> {
         let mut mirth_jars = Vec::new();
         let mut other_jars = Vec::new();
 
@@ -286,53 +297,52 @@ impl WebstartFile {
             }
         }
 
-        if ce.show_console {
-            let console_jar = console_jar
-                .ok_or(Error::msg("Java console jar path not provided"))?;
-
-            let java_bin = if java_home.is_empty() {
-                PathBuf::from("java")
-            } else {
-                PathBuf::from(java_home).join("bin").join("java")
-            };
-
-            let mut console_cmd = Command::new(&java_bin);
-            console_cmd
-                .arg("-Xmx256m")
-                .arg("-cp")
-                .arg(console_jar.to_str().ok_or_else(|| Error::msg("console jar path is not valid UTF-8"))?)
-                .arg("com.innovarhealthcare.launcher.JavaConsoleDialog")
-                .stdin(Stdio::piped());
-            #[cfg(windows)]
-            console_cmd.creation_flags(CREATE_NO_WINDOW);
-            let mut console_proc = console_cmd.spawn()?;
-
+        if let Some(console) = console {
+            // Capture BOTH stdout and stderr. Swing/AWT exceptions from the
+            // administrator land on stderr, so capturing only stdout (as the
+            // old Java console did) silently dropped them.
             cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
             #[cfg(windows)]
             cmd.creation_flags(CREATE_NO_WINDOW);
-            let mut target_proc = cmd.spawn()?;
+            info!("launching with console: {:?}", cmd);
+            let mut child = cmd.spawn()?;
 
-            let target_stdout = target_proc.stdout.take();
-            let console_stdin = console_proc.stdin.take();
-            if let (Some(stdout), Some(stdin)) = (target_stdout, console_stdin) {
-                std::thread::spawn(move || {
-                    use std::io::{Read, Write};
-                    let mut stdout = stdout;
-                    let mut stdin = stdin;
-                    let mut buf = [0u8; 1024];
-                    loop {
-                        match stdout.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                let _ = stdin.write_all(&buf[..n]);
-                                let _ = stdin.flush();
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    let _ = console_proc.kill();
-                });
-            }
+            let out_reader = child
+                .stdout
+                .take()
+                .map(|out| spawn_console_reader(out, "out", Arc::clone(&console.buf)));
+            let err_reader = child
+                .stderr
+                .take()
+                .map(|err| spawn_console_reader(err, "err", Arc::clone(&console.buf)));
+
+            // Reap the process, then wait for the readers to drain the final
+            // output before posting the exit notice so it appears last. Reaping
+            // also avoids the zombie the fire-and-forget path used to leak.
+            let buf = console.buf;
+            let generation = console.generation;
+            let app = console.app;
+            let label = console.label;
+            std::thread::spawn(move || {
+                let exit = child.wait();
+                if let Some(h) = out_reader {
+                    let _ = h.join();
+                }
+                if let Some(h) = err_reader {
+                    let _ = h.join();
+                }
+                let (status, clean) = match exit {
+                    Ok(s) => (format!("process exited ({})", s), s.success()),
+                    Err(e) => (format!("failed to wait on process: {}", e), false),
+                };
+                // Close the console only on a clean exit of the current process.
+                // On an abend (non-zero), leave it open so the error/stack trace
+                // stays readable.
+                if crate::console::mark_exited(&buf, generation, status) && clean {
+                    crate::console::close_window(&app, &label);
+                }
+            });
         } else {
             let log_path = self.logs_dir.join(format!("{}.log", self.conn_id));
             let log_file = File::create(&log_path);
@@ -355,6 +365,37 @@ impl WebstartFile {
 
         Ok(())
     }
+}
+
+/// Read a child stream line by line and push each line into the console buffer.
+/// Runs on its own thread; exits at EOF or on read error. Returns the join
+/// handle so the reaper can wait for the final output before posting exit.
+fn spawn_console_reader<R: Read + Send + 'static>(
+    reader: R,
+    stream: &'static str,
+    buf: Arc<Mutex<crate::console::ConsoleBuf>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut r = BufReader::new(reader);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            // read_until tolerates non-UTF-8 bytes (e.g. platform-encoded output
+            // on Windows); decode lossily so a single bad byte can't kill the
+            // reader and silently truncate the rest of the console.
+            match r.read_until(b'\n', &mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {
+                    while matches!(bytes.last(), Some(b'\n') | Some(b'\r')) {
+                        bytes.pop();
+                    }
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    crate::console::push_line(&buf, stream, text);
+                }
+                Err(_) => break,
+            }
+        }
+    })
 }
 
 /// Sanitize a string for use as a filesystem path component.
@@ -535,7 +576,7 @@ fn get_node<'a>(root: &'a Node, tag_name: &str) -> Option<Node<'a, 'a>> {
     root.descendants().find(|n| n.has_tag_name(tag_name))
 }
 
-fn normalize_url(u: &str) -> Result<String, Error> {
+pub(crate) fn normalize_url(u: &str) -> Result<String, Error> {
     let parsed_url = Url::parse(u)?;
     let mut reconstructed_url = String::with_capacity(u.len());
     reconstructed_url.push_str(parsed_url.scheme());
