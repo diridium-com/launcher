@@ -30,6 +30,7 @@ cargo test
 - Tauri commands use `rename_all = "snake_case"` — JS side must use snake_case parameter names
 - Self-signed certs are expected; the trust boundary is **per-connection TLS certificate pinning** (trust-on-first-use). First connect prompts the operator to trust the server's leaf-cert SHA-256; later connects reject a changed cert. There is no JAR signature verification (the old `verify.rs` was removed). `native-tls` is kept only for the http plugin's connectivity probe; the launch path uses a pinned rustls client.
 - The admin console is a native Tauri webview window fed by Rust over a Channel (no bundled Java console jar)
+- The administrator is a JavaFX app, so the Java used to launch it (the connection's Java Home, or `java` on PATH) must be a JavaFX-enabled JDK. `launch` fails fast with a clear message if Java can't be found; the launcher does not auto-detect a JDK (uses `JAVA_HOME`/PATH only).
 - Rust error handling: prefer `?` operator and `ok_or_else` over `.unwrap()` — return errors to frontend, don't panic
 - Mutex locks: use `.expect("descriptive message")` since poisoning is unrecoverable
 - Frontend uses Tailwind CSS v4 with `@theme` design tokens in `app/assets/css/main.css`

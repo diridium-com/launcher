@@ -92,7 +92,7 @@ const handleDelete = async () => {
         <!-- Right column: Java -->
         <section class="space-y-3">
           <h2 class="text-xs font-medium text-text-tertiary uppercase tracking-wider">Configuration</h2>
-          <connection-input type="text" label="Java Home" placeholder="/usr/lib/jvm/java-11" v-model="server.javaHome" />
+          <connection-input type="text" label="Java Home" placeholder="/usr/lib/jvm/java-11" hint="Requires a JavaFX-enabled JDK" v-model="server.javaHome" />
           <div class="space-y-1">
             <label class="block text-sm font-medium text-text-secondary select-none">JVM Arguments</label>
             <textarea

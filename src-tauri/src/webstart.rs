@@ -396,7 +396,7 @@ pub fn check_java_available(java_home: &str) -> Result<(), Error> {
                 format!("at {}", java_bin.display())
             };
             Err(Error::msg(format!(
-                "Java not found {}. Set Java Home on the connection, or install/configure Java on PATH.",
+                "Java (with JavaFX) not found {}. Set Java Home to a JavaFX-enabled JDK, or put one on PATH.",
                 location
             )))
         }

@@ -5,6 +5,7 @@ defineProps<{
   label?: string
   type: string
   placeholder?: string
+  hint?: string
 }>()
 
 const inputId = useId()
@@ -26,5 +27,6 @@ const inputId = useId()
       class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
       v-model="model"
     />
+    <p v-if="hint" class="text-xs text-text-tertiary select-none">{{ hint }}</p>
   </div>
 </template>
