@@ -116,37 +116,40 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
         let label = console_window_label(&ce.id);
         let buf = registry.get_or_create(&label);
         let generation = console::reset_for_relaunch(&buf);
-
-        // Create (or focus) the console window on the main thread.
-        let app_handle = app.clone();
-        let win_label = label.clone();
-        let win_title = format!("Console — {}", ce.name);
-        app.run_on_main_thread(move || {
-            if let Some(w) = app_handle.get_webview_window(&win_label) {
-                let _ = w.set_focus();
-            } else if let Err(e) = WebviewWindowBuilder::new(
-                &app_handle,
-                win_label.as_str(),
-                WebviewUrl::default(),
-            )
-            .title(win_title)
-            .inner_size(760.0, 520.0)
-            .build()
-            {
-                warn!("failed to create console window: {}", e);
-            }
-        })
-        .map_err(|e| e.to_string())?;
-
         Some(console::ConsoleSink { buf, generation, app: app.clone(), label })
     } else {
         None
     };
+    // Capture what we need to open the console window AFTER the spawn succeeds,
+    // so a failed launch (e.g. java not found) doesn't pop an empty console.
+    let console_window = console_sink
+        .as_ref()
+        .map(|s| (s.label.clone(), format!("Console — {}", ce.name)));
+
     let r = ws.run(ce, console_sink);
     if let Err(e) = r {
         let msg = e.to_string();
         warn!("{}", msg);
         return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
+    }
+
+    // The process spawned — now open (or focus) the console window. Output
+    // produced before the window attaches is replayed from the backlog.
+    if let Some((label, title)) = console_window {
+        let app_handle = app.clone();
+        app.run_on_main_thread(move || {
+            if let Some(w) = app_handle.get_webview_window(&label) {
+                let _ = w.set_focus();
+            } else if let Err(e) =
+                WebviewWindowBuilder::new(&app_handle, label.as_str(), WebviewUrl::default())
+                    .title(title)
+                    .inner_size(760.0, 520.0)
+                    .build()
+            {
+                warn!("failed to create console window: {}", e);
+            }
+        })
+        .map_err(|e| e.to_string())?;
     }
 
     let _ = cs.update_last_connected(&id);
