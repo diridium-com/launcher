@@ -17,20 +17,19 @@ cargo test
 
 ## Project Structure
 
-- `src-tauri/src/` — Rust backend (Tauri commands, jar verification, webstart/JNLP handling)
+- `src-tauri/src/` — Rust backend (Tauri commands, TLS cert pinning, webstart/JNLP handling)
   - `main.rs` — Tauri command handlers and app setup
-  - `connection.rs` — ConnectionStore, connection persistence, cert trust management
+  - `connection.rs` — ConnectionStore, connection persistence, per-connection cert pin storage
   - `webstart.rs` — JNLP parsing, jar downloading, Java process launching
-  - `verify.rs` — Jar signature verification (CMS/PKCS#7)
-  - `errors.rs` — VerificationError type and formatting
+  - `tls.rs` — per-connection TLS certificate pinning (trust-on-first-use) and the pinned reqwest client
+  - `console.rs` — native console subsystem (streams the admin process stdout/stderr to a Tauri window)
 - `app/` — Nuxt 4 frontend (pages, components, composables, types)
-- `src-tauri/lib/` — Bundled Java console jar
 
 ## Conventions
 
 - Tauri commands use `rename_all = "snake_case"` — JS side must use snake_case parameter names
-- Self-signed certs are expected — `danger_accept_invalid_certs(true)` is intentional
-- Jar signature verification is the actual trust boundary, not TLS
+- Self-signed certs are expected; the trust boundary is **per-connection TLS certificate pinning** (trust-on-first-use). First connect prompts the operator to trust the server's leaf-cert SHA-256; later connects reject a changed cert. There is no JAR signature verification (the old `verify.rs` was removed). `native-tls` is kept only for the http plugin's connectivity probe; the launch path uses a pinned rustls client.
+- The admin console is a native Tauri webview window fed by Rust over a Channel (no bundled Java console jar)
 - Rust error handling: prefer `?` operator and `ok_or_else` over `.unwrap()` — return errors to frontend, don't panic
 - Mutex locks: use `.expect("descriptive message")` since poisoning is unrecoverable
 - Frontend uses Tailwind CSS v4 with `@theme` design tokens in `app/assets/css/main.css`
@@ -38,5 +37,4 @@ cargo test
 
 ## Remotes
 
-- `origin` — upstream `kayyagari/ballista`
-- `mine` — fork `pacmano1/launcher`
+- `origin` — `pacmano1/launcher`

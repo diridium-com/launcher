@@ -79,24 +79,39 @@ impl Default for ConnectionEntry {
 impl ConnectionStore {
     pub fn init(data_dir_path: PathBuf) -> Result<Self, Error> {
         let con_location = data_dir_path.join("launcher-data.json");
-        let mut con_location_file = File::open(&con_location);
-        if let Err(_e) = con_location_file {
-            con_location_file = File::create(&con_location);
-        }
-        let con_location_file = con_location_file?;
 
         let mut cache = HashMap::new();
-        let data: serde_json::Result<HashMap<String, ConnectionEntry>> =
-            serde_json::from_reader(con_location_file);
-        match data {
-            Ok(data) => {
-                for (id, ce) in data {
-                    cache.insert(id, Arc::new(ce));
+        // An empty or missing file is a normal first run. A non-empty file that
+        // won't parse is preserved (renamed aside) before we start empty, so a
+        // corrupt config never silently wipes the user's saved connections.
+        match fs::read_to_string(&con_location) {
+            Ok(contents) if contents.trim().is_empty() => {}
+            Ok(contents) => {
+                match serde_json::from_str::<HashMap<String, ConnectionEntry>>(&contents) {
+                    Ok(data) => {
+                        for (id, ce) in data {
+                            cache.insert(id, Arc::new(ce));
+                        }
+                    }
+                    Err(e) => {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let backup = con_location
+                            .with_file_name(format!("launcher-data.corrupt-{}.json", ts));
+                        warn!(
+                            "could not parse {:?}: {}; backing it up to {:?} and starting empty",
+                            con_location, e, backup
+                        );
+                        if let Err(re) = fs::rename(&con_location, &backup) {
+                            warn!("failed to back up unparseable connection store: {}", re);
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                info!("{}", e);
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::new(e)),
         }
 
         let cache_dir = data_dir_path.join("cache");

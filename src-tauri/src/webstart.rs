@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use anyhow::Error;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use log::info;
+use log::{info, warn};
 use reqwest::blocking::Client;
 use reqwest::Url;
 use roxmltree::Node;
@@ -99,6 +99,10 @@ impl WebstartFile {
     pub fn load(config: LoadConfig) -> Result<WebstartFile, Error> {
         let base_url = normalize_url(config.base_url)?;
         let webstart = format!("{}/webstart.jnlp", base_url);
+        // The connection id can come from an imported file, so sanitize it before
+        // it ever touches the filesystem (cache dirs, log path). main.rs already
+        // sanitizes the same id for window labels.
+        let safe_conn_id = sanitize_for_path(config.conn_id);
         let _ = config.on_progress.send(serde_json::json!({"message": "Fetching server configuration..."}));
         // Download over a pinned-TLS client. The launch command guarantees the
         // pin is present and matches the live cert before we get here.
@@ -133,7 +137,7 @@ impl WebstartFile {
 
         // Build jar_dir based on donotcache flag and engine type
         let jar_dir = if config.donotcache {
-            let dir = config.cache_dir.join("_isolated").join(config.conn_id);
+            let dir = config.cache_dir.join("_isolated").join(&safe_conn_id);
             if dir.exists() {
                 info!("removing isolated cache directory {:?}", dir);
                 std::fs::remove_dir_all(&dir)?;
@@ -169,7 +173,7 @@ impl WebstartFile {
                 .chars()
                 .map(|c| if c.is_alphanumeric() { c } else { '-' })
                 .collect::<String>();
-            let id_prefix = &config.conn_id[..config.conn_id.len().min(8)];
+            let id_prefix = &safe_conn_id[..safe_conn_id.len().min(8)];
             let old_cache_folder = format!("{}_{}", sanitized_name, id_prefix);
             let old_jar_dir = config.cache_dir.join(old_cache_folder);
             if old_jar_dir.exists() {
@@ -182,7 +186,7 @@ impl WebstartFile {
             main_class,
             jar_dir,
             logs_dir: config.logs_dir.clone(),
-            conn_id: config.conn_id.to_string(),
+            conn_id: safe_conn_id,
             args,
             loaded_at: SystemTime::now(),
             j2ses,
@@ -492,11 +496,19 @@ fn collect_jar_tasks(
 
         if jar {
             let file_name = get_file_name_from_path(href);
+            if !is_safe_basename(file_name) {
+                warn!("skipping jar with unsafe href: {}", href);
+                continue;
+            }
             let file_path = jar_output_dir.join(file_name);
             let hash = n.attribute("sha256").map(|s| s.to_string());
             tasks.push(JarTask { url, file_path, hash });
         } else if extension {
             let ext_name = get_file_name_from_path(href);
+            if !is_safe_basename(ext_name) {
+                warn!("skipping extension with unsafe href: {}", href);
+                continue;
+            }
             let ext_dir_name = ext_name.strip_suffix(".jnlp").unwrap_or(ext_name);
             let ext_dir = cache_root.join("extensions").join(ext_dir_name);
             if !ext_dir.exists() {
@@ -545,7 +557,15 @@ fn sanitize_vm_args(args: &str) -> String {
 }
 
 fn get_file_name_from_path(p: &str) -> &str {
-    p.rsplit('/').next().unwrap_or(p)
+    // Split on both separators: a server-supplied href could use '\' to escape
+    // the cache directory on Windows.
+    p.rsplit(['/', '\\']).next().unwrap_or(p)
+}
+
+/// A basename is safe to join under the cache only if it has no path separators
+/// and is not a traversal component.
+fn is_safe_basename(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
 fn get_client_args(root: &Node) -> Vec<String> {
