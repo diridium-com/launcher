@@ -309,7 +309,7 @@ impl WebstartFile {
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
             cmd.creation_flags(CREATE_NO_WINDOW);
-            info!("launching with console: {:?}", cmd);
+            info!("launching administrator with console (main class {})", self.main_class);
             let mut child = cmd.spawn()?;
 
             let out_reader = child
@@ -363,7 +363,7 @@ impl WebstartFile {
             }
             #[cfg(windows)]
             cmd.creation_flags(CREATE_NO_WINDOW);
-            info!("launching: {:?}", cmd);
+            info!("launching administrator (main class {})", self.main_class);
             cmd.spawn()?;
         }
 

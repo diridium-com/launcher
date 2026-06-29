@@ -8,8 +8,6 @@
   "permissions": [
     "core:default",
     "dialog:default",
-    "notification:default",
-    "fs:default",
     "core:webview:allow-set-webview-zoom",
 
     {

@@ -89,6 +89,8 @@ const isAvailable = computed(() => currentStatus.value === LandingScreenServerSt
 
     <div class="flex-none flex items-center gap-1 ml-2">
       <button
+        type="button"
+        :aria-label="`Launch ${server.name}`"
         @click.stop="emit('launch')"
         class="flex items-center justify-center size-7 rounded-md transition-all duration-100"
         :class="isAvailable
@@ -98,6 +100,8 @@ const isAvailable = computed(() => currentStatus.value === LandingScreenServerSt
         <icon name="ph:play-fill" class="text-sm" />
       </button>
       <button
+        type="button"
+        :aria-label="`Edit ${server.name}`"
         @click.stop="emit('edit')"
         class="flex items-center justify-center size-7 rounded-md hover:bg-surface-3 text-text-tertiary hover:text-text-primary transition-all duration-100 hover:cursor-pointer"
       >

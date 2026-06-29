@@ -1,7 +1,3 @@
-export interface LauncherInfo {
-  launcher_version: string
-}
-
 export interface Connection {
   address: string
   heapSize: string
@@ -18,10 +14,6 @@ export interface Connection {
   showConsole: boolean
   engineType: string
   pinnedCertSha256: string | null
-
-  // the below properties are transient and are used only in the UI
-  nodeId: string
-  parentId: string
 }
 
 // Server leaf certificate details shown in the trust prompt. `sha256` (hex) is

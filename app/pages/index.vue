@@ -238,18 +238,24 @@ const deselectAll = () => {
       </div>
       <div class="flex items-center gap-2">
         <button
+          type="button"
+          :aria-label="theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
           @click="toggleTheme"
           class="flex items-center justify-center size-6 rounded-md text-text-disabled hover:text-text-tertiary hover:cursor-pointer transition-colors duration-100"
         >
           <icon :name="theme === 'dark' ? 'ph:sun' : 'ph:moon'" class="text-sm" />
         </button>
         <button
+          type="button"
+          aria-label="Help"
           @click="openHelp"
           class="flex items-center justify-center size-6 rounded-md text-text-disabled hover:text-text-tertiary hover:cursor-pointer transition-colors duration-100"
         >
           <icon name="ph:question" class="text-sm" />
         </button>
         <button
+          type="button"
+          aria-label="About"
           @click="showAbout = true"
           class="flex items-center justify-center size-6 rounded-md text-text-disabled hover:text-text-tertiary hover:cursor-pointer transition-colors duration-100"
         >
