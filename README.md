@@ -27,7 +27,7 @@ Follow the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) f
 
 A good reference for build steps is [`.github/workflows/build-launcher.yml`](.github/workflows/build-launcher.yml).
 
-If you plan to build the project on Windows please refer to this guide on OpenSSL: [OpenSSL](.OpenSSL_Windows.md)
+If you plan to build the project on Windows please refer to this guide on setting up OpenSSL: [OpenSSL](OpenSSL_Windows.md)
 
 ### Quick Start
 
