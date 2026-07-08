@@ -27,22 +27,13 @@ Follow the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/) f
 
 A good reference for build steps is [`.github/workflows/build-launcher.yml`](.github/workflows/build-launcher.yml).
 
+If you plan to build the project on Windows please refer to this guide on OpenSSL: [OpenSSL](.OpenSSL_Windows.md)
+
 ### Quick Start
 
 ```bash
 npm install
 npm run tauri build
-```
-
-### Windows
-
-Follow the openssl instructions at https://docs.rs/crate/openssl/0.9.24 using PowerShell:
-
-```powershell
-$env:OPENSSL_DIR='C:\Program Files\OpenSSL-Win64\'
-$env:OPENSSL_INCLUDE_DIR='C:\Program Files\OpenSSL-Win64\include'
-$env:OPENSSL_LIB_DIR='C:\Program Files\OpenSSL-Win64\lib'
-$env:OPENSSL_NO_VENDOR=1
 ```
 
 ## License
