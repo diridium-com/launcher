@@ -11,10 +11,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-tauri-build = { version = "2.5.5", features = [] }
+tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
-tauri = { version = "2.10.2", features = ["tray-icon"] }
+tauri = { version = "2.11", features = ["tray-icon"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 # the above are added and required by Tauri
@@ -32,10 +32,10 @@ log = "0.4"
 uuid = {version = "1.21.0", features = ["v4", "fast-rng"] }
 home = "0.5.12"
 rustc-hash = "2.1.1"
-tauri-plugin-shell = "2.3.5"
-tauri-plugin-http = { version = "2.5.7", features = ["dangerous-settings"] }
-tauri-plugin-clipboard-manager = "2.3.2"
-tauri-plugin-dialog = "2.6.0"
+tauri-plugin-shell = "2.3"
+tauri-plugin-http = { version = "2.5", features = ["dangerous-settings"] }
+tauri-plugin-clipboard-manager = "2.3"
+tauri-plugin-dialog = "2.6"
 
 [dependencies.fix-path-env]
 git = "https://github.com/tauri-apps/fix-path-env-rs"
