@@ -25,6 +25,7 @@
     "vue": "^3.5.29"
   },
   "devDependencies": {
+    "@iconify-json/ph": "^1.2.2",
     "@nuxt/icon": "^2.2.1",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.17.2",

@@ -43,6 +43,45 @@ export default defineNuxtConfig({
 
   modules: ["@nuxt/icon"],
 
+  icon: {
+    // Bundle the Phosphor icons into the client build so they render offline
+    // with no runtime fetch to the Iconify API (which the app's CSP connect-src
+    // intentionally forbids). `scan` catches static <Icon name="ph:..."> usages;
+    // the explicit list also covers the dynamically-bound ones (option.icon,
+    // the sun/moon theme toggles) that a scan cannot see.
+    clientBundle: {
+      scan: true,
+      icons: [
+        "ph:arrow-clockwise",
+        "ph:caret-down",
+        "ph:caret-right-bold",
+        "ph:check-bold",
+        "ph:circle-half",
+        "ph:circle-notch-bold",
+        "ph:clock",
+        "ph:copy",
+        "ph:download-simple-bold",
+        "ph:floppy-disk",
+        "ph:folders",
+        "ph:hard-drives",
+        "ph:info",
+        "ph:magnifying-glass",
+        "ph:moon",
+        "ph:pencil-simple",
+        "ph:play-fill",
+        "ph:plus-bold",
+        "ph:question",
+        "ph:shield-check",
+        "ph:sort-ascending",
+        "ph:sun",
+        "ph:terminal-window",
+        "ph:trash",
+        "ph:warning-octagon",
+        "ph:x",
+      ],
+    },
+  },
+
   css: ["~/assets/css/main.css"],
 
   vite: {

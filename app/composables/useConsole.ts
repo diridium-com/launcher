@@ -3,7 +3,6 @@
 
 import { ref } from "vue"
 import { Channel, invoke } from "@tauri-apps/api/core"
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow"
 import { save as saveDialog } from "@tauri-apps/plugin-dialog"
 import { writeText } from "@tauri-apps/plugin-clipboard-manager"
 
@@ -29,7 +28,6 @@ export function useConsole() {
   // channel before attaching it as the live sink, so backlog and live output
   // arrive in order with no gaps or duplicates — no client-side reordering.
   async function start() {
-    const label = getCurrentWebviewWindow().label
     const channel = new Channel<ConsoleMsg>()
     channel.onmessage = (msg) => {
       if (msg.kind === "reset") exited.value = null
@@ -41,7 +39,9 @@ export function useConsole() {
       received.value++
     }
     try {
-      await invoke("console_subscribe", { label, on_line: channel })
+      // The backend derives the console buffer from THIS window's own label, so
+      // no label is sent and a window cannot subscribe to another's output.
+      await invoke("console_subscribe", { on_line: channel })
     } catch (e) {
       lines.value.push({ kind: "line", stream: "err", text: `console error: ${e}` })
     }

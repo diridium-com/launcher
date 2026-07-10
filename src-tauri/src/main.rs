@@ -241,6 +241,13 @@ fn main() {
             exit(1);
         }
     }
+    // This dir holds launcher-data.json (plaintext passwords) and per-connection
+    // logs; restrict it to the owner on Unix. Best-effort, not fatal on failure.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&launcher_directory, fs::Permissions::from_mode(0o700));
+    }
 
     // Migrate from legacy directories if they exist
     let legacy_ballista_dir = home_directory.join(".ballista");
