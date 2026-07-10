@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 /// Max lines retained for replay to a window that attaches late. Live streaming
 /// is unbounded; only this backlog is capped, to bound memory on chatty engines.
@@ -157,10 +157,14 @@ pub fn reset_for_relaunch(buf: &Arc<Mutex<ConsoleBuf>>) -> u64 {
 /// replay ends — no gaps, no duplicates.
 #[tauri::command(rename_all = "snake_case")]
 pub fn console_subscribe(
-    label: String,
+    webview: WebviewWindow,
     on_line: Channel<ConsoleMsg>,
     registry: State<'_, ConsoleRegistry>,
 ) -> Result<(), String> {
+    // Attach only to THIS window's own console buffer. The label is taken from
+    // the calling window, not a caller-supplied argument, so one window cannot
+    // subscribe to (and read) another console's output.
+    let label = webview.label().to_string();
     let buf = registry
         .get(&label)
         .ok_or_else(|| format!("no console buffer for {}", label))?;

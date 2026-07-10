@@ -15,6 +15,27 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+/// Create a file readable/writable only by the owner (0600 on Unix). The
+/// connection store holds plaintext passwords, so it must not be written at the
+/// default umask (typically world-readable 0644). On non-Unix it falls back to
+/// the platform default; the file lives under the user's home directory.
+fn create_private_file(path: &std::path::Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::create(path)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionEntry {
     pub address: String,
@@ -229,7 +250,7 @@ impl ConnectionStore {
         // launcher-data.json. The lock is released before this blocking I/O.
         let tmp = self.con_location.with_file_name("launcher-data.json.tmp");
         {
-            let mut f = File::create(&tmp).map_err(|e| {
+            let mut f = create_private_file(&tmp).map_err(|e| {
                 warn!("unable to open file for writing: {}", e);
                 Error::new(e)
             })?;
