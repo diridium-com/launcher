@@ -99,6 +99,20 @@ jobs:
         if: matrix.platform == 'ubuntu-latest'
         run: npm audit --audit-level=high
 
+      - name: Verify tag matches manifest version
+        # tauri-action names and tags the release from the manifest version
+        # (package.json), not the pushed tag. If they diverge, the release would
+        # be mis-tagged and could clobber an existing one. Fail fast on mismatch.
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          manifest="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$manifest" ]; then
+            echo "::error::Pushed tag $GITHUB_REF_NAME does not match manifest version $manifest. Bump package.json and src-tauri/Cargo.toml to match the tag."
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches manifest $manifest"
+
       - name: Build the app and release
         # Release ONLY when a version tag (vX.Y.Z) is pushed, not on every master
         # push. Pushing a v* tag builds and drafts a release for that version;
