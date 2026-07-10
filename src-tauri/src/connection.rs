@@ -22,13 +22,19 @@ use uuid::Uuid;
 fn create_private_file(path: &std::path::Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(path)
+            .open(path)?;
+        // `.mode()` only applies when the file is newly created. Set it
+        // explicitly so a pre-existing tmp (e.g. left world-readable by a crash
+        // in an older build that used File::create) is tightened to owner-only
+        // before we write the plaintext-password JSON into it.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(f)
     }
     #[cfg(not(unix))]
     {
@@ -343,4 +349,28 @@ fn get_default_donotcache() -> bool {
 
 fn get_default_engine_type() -> String {
     String::from("Open Integration Engine")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::create_private_file;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn create_private_file_enforces_owner_only_even_if_preexisting() {
+        let dir = std::env::temp_dir().join(format!("launcher-perm-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("launcher-data.json.tmp");
+
+        // Simulate a stale, world-readable tmp left by an older build's File::create.
+        fs::write(&path, b"stale").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _f = create_private_file(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secrets file must be owner-only (0600)");
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

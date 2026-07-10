@@ -121,7 +121,8 @@ const launchServer = async (connection: Connection) => {
 
   try {
     // Loop so a certificate trust prompt can be shown, then the launch retried.
-    // code 0 = launched, 2 = first-use trust, 3 = cert changed, else = error.
+    // code 0 = launched, 2 = first-use trust, 3 = cert changed, 4 = cache
+    // mismatch, else = error.
     // Bounded so a cert that changes every handshake can't re-prompt forever.
     let attempts = 0
     let force = false

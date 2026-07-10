@@ -503,44 +503,42 @@ fn download_jars(
     // stock counterparts. Includes cache-hit jars, not just freshly downloaded.
     let classpath_jars: Vec<PathBuf> = tasks.iter().map(|t| t.file_path.clone()).collect();
 
-    // Foreign-jar (engine-collision) check. A jar that is already on disk but
-    // whose content differs from the sha256 this JNLP declares can only be a
-    // different engine's jar, because a given engine version always ships the
-    // identical jar set. That usually means two connections share an engine
-    // type but point at different engines (same cache dir). Abort so the
-    // operator can confirm, unless they already acknowledged it.
-    if !acknowledge_cache_mismatch {
-        let mut foreign = Vec::new();
-        for task in &tasks {
-            if let (Some(declared), true) = (task.hash.as_deref(), task.file_path.exists()) {
-                if let Some(on_disk) = sha256_of_file(&task.file_path) {
-                    if on_disk.as_str() != declared {
-                        if let Some(name) = task.file_path.file_name().and_then(|n| n.to_str()) {
-                            foreign.push(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        if !foreign.is_empty() {
-            foreign.sort();
-            return Err(CacheMismatch {
-                engine_type: engine_type.to_string(),
-                version: version.to_string(),
-                jars: foreign,
-            }
-            .into());
-        }
-    }
-
     let _ = on_progress.send(serde_json::json!({
         "message": format!("Checking {} cached files...", tasks.len()),
     }));
+
+    // Single hash pass over the cached jars. classify_cached_jar reads each file
+    // at most once and decides BOTH whether it needs (re)downloading and whether
+    // it is a foreign-engine jar (present, has a declared hash, and the on-disk
+    // content does not match). Because a given engine version always ships the
+    // identical jar set, a content mismatch under the same version can only be a
+    // different engine's jar, i.e. two connections sharing an engine type but
+    // pointing at different engines (same cache dir). If any are found and the
+    // operator has not acknowledged it, abort with CacheMismatch before any
+    // download.
     let mut to_download = Vec::new();
+    let mut foreign = Vec::new();
     for task in &tasks {
-        if has_file_changed(&task.file_path, task.hash.as_deref())? {
+        let (needs_download, is_foreign) =
+            classify_cached_jar(&task.file_path, task.hash.as_deref());
+        if needs_download {
             to_download.push(task);
         }
+        if is_foreign {
+            if let Some(name) = task.file_path.file_name().and_then(|n| n.to_str()) {
+                foreign.push(name.to_string());
+            }
+        }
+    }
+
+    if !acknowledge_cache_mismatch && !foreign.is_empty() {
+        foreign.sort();
+        return Err(CacheMismatch {
+            engine_type: engine_type.to_string(),
+            version: version.to_string(),
+            jars: foreign,
+        }
+        .into());
     }
 
     if to_download.is_empty() {
@@ -734,24 +732,62 @@ fn sha256_of_file(path: &Path) -> Option<String> {
     Some(BASE64.encode(hasher.finalize()))
 }
 
-fn has_file_changed(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> Result<bool, Error> {
+/// Classify one cached jar in a single hash read: `(needs_download, is_foreign)`.
+///
+/// - missing file: needs download, not foreign.
+/// - present, no JNLP hash to compare: keep (not downloaded, not foreign).
+/// - present, hash matches: keep.
+/// - present, hash differs: needs download AND foreign. A same-named jar with
+///   different content is a different engine's jar, since a given engine version
+///   always ships the identical jar set.
+/// - present but unreadable: treated as unchanged (matches prior behavior).
+fn classify_cached_jar(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> (bool, bool) {
     if !jar_file_path.exists() {
-        return Ok(true);
+        return (true, false);
     }
-    if let Some(hash_in_jnlp) = hash_in_jnlp {
-        if let Some(current_hash) = sha256_of_file(jar_file_path) {
-            return Ok(hash_in_jnlp != current_hash.as_str());
-        }
+    match hash_in_jnlp {
+        None => (false, false),
+        Some(declared) => match sha256_of_file(jar_file_path) {
+            None => (false, false),
+            Some(on_disk) => {
+                let differs = on_disk.as_str() != declared;
+                (differs, differs)
+            }
+        },
     }
-    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{get_file_name_from_path, is_safe_basename, normalize_url, sanitize_for_path, WebstartFile};
+    use super::{
+        classify_cached_jar, get_file_name_from_path, is_safe_basename, normalize_url,
+        sanitize_for_path, sha256_of_file, WebstartFile,
+    };
     use anyhow::Error;
     use std::path::PathBuf;
     use std::time::SystemTime;
+
+    #[test]
+    fn classify_cached_jar_detects_foreign_and_missing() {
+        use std::fs;
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("launcher-cj-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("a.jar");
+        fs::File::create(&jar).unwrap().write_all(b"hello world").unwrap();
+        let real = sha256_of_file(&jar).unwrap();
+
+        // present + matching declared hash -> keep, not foreign
+        assert_eq!(classify_cached_jar(&jar, Some(&real)), (false, false));
+        // present + differing declared hash -> download AND foreign
+        assert_eq!(classify_cached_jar(&jar, Some("not-the-hash")), (true, true));
+        // present + no declared hash -> keep, not foreign
+        assert_eq!(classify_cached_jar(&jar, None), (false, false));
+        // missing file -> download, not foreign
+        assert_eq!(classify_cached_jar(&dir.join("missing.jar"), Some("x")), (true, false));
+
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn classpath_preserves_jnlp_order_and_does_not_sort() {
