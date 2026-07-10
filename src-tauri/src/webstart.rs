@@ -44,7 +44,41 @@ pub struct LoadConfig<'a> {
     /// The connection's trusted leaf-cert SHA-256 (hex). Required here: the
     /// launch command verifies/captures the pin before calling load().
     pub pinned_cert_sha256: Option<String>,
+    /// When false, a cache dir that already holds jars whose contents differ
+    /// from what this server's JNLP declares (a foreign-engine collision under
+    /// the same engine-type + version) aborts with [`CacheMismatch`] so the
+    /// operator can confirm. When true, the operator has acknowledged it and the
+    /// differing jars are overwritten.
+    pub acknowledge_cache_mismatch: bool,
 }
+
+/// Returned by `load` when the cache directory for this engine-type + version
+/// already contains jars whose contents differ from what the server's JNLP
+/// declares. Because a given engine version always ships the identical jar set,
+/// a content difference under the same version means a *different* engine's jars
+/// are in this shared directory, which usually means two connections share an
+/// engine type but point at different engines. Carried up as an `anyhow::Error`
+/// and downcast by the launch command into a distinct frontend code.
+#[derive(Debug)]
+pub struct CacheMismatch {
+    pub engine_type: String,
+    pub version: String,
+    pub jars: Vec<String>,
+}
+
+impl std::fmt::Display for CacheMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cache for {} {} holds {} file(s) that differ from this server",
+            self.engine_type,
+            self.version,
+            self.jars.len()
+        )
+    }
+}
+
+impl std::error::Error for CacheMismatch {}
 
 #[derive(Debug)]
 pub struct WebstartFile {
@@ -133,9 +167,11 @@ impl WebstartFile {
         let resources_node = get_node(&root, "resources");
 
         let mut jnlp_version = "default".to_string();
+        let mut jnlp_version_raw = "default".to_string();
         if let Some(jnlp_node) = get_node(&root, "jnlp") {
             if let Some(v) = jnlp_node.attribute("version") {
                 jnlp_version = v.replace(['/', '\\', '.'], "_");
+                jnlp_version_raw = v.to_string();
             }
         }
 
@@ -168,7 +204,16 @@ impl WebstartFile {
         let mut classpath_jars = Vec::new();
         if let Some(resources_node) = resources_node {
             j2ses = get_j2ses(&resources_node);
-            classpath_jars = download_jars(&resources_node, &client, &jar_dir, &base_url, config.on_progress)?;
+            classpath_jars = download_jars(
+                &resources_node,
+                &client,
+                &jar_dir,
+                &base_url,
+                config.on_progress,
+                config.acknowledge_cache_mismatch,
+                config.engine_type,
+                &jnlp_version_raw,
+            )?;
         }
 
         // Migration: clean up old per-connection cache directory
@@ -434,12 +479,19 @@ struct JarTask {
     hash: Option<String>,
 }
 
+// Internal download helper; the extra args are the collision-check context
+// (labels + the ack flag). Grouping them into a struct for one private fn would
+// be more indirection than it's worth.
+#[allow(clippy::too_many_arguments)]
 fn download_jars(
     resources_node: &Node,
     client: &Client,
     dir_path: &Path,
     base_url: &str,
     on_progress: &Channel<serde_json::Value>,
+    acknowledge_cache_mismatch: bool,
+    engine_type: &str,
+    version: &str,
 ) -> Result<Vec<PathBuf>, Error> {
     let mut tasks = Vec::new();
     let core_dir = dir_path.join("core");
@@ -450,6 +502,36 @@ fn download_jars(
     // This must NOT be re-sorted; Mirth relies on overlay jars preceding their
     // stock counterparts. Includes cache-hit jars, not just freshly downloaded.
     let classpath_jars: Vec<PathBuf> = tasks.iter().map(|t| t.file_path.clone()).collect();
+
+    // Foreign-jar (engine-collision) check. A jar that is already on disk but
+    // whose content differs from the sha256 this JNLP declares can only be a
+    // different engine's jar, because a given engine version always ships the
+    // identical jar set. That usually means two connections share an engine
+    // type but point at different engines (same cache dir). Abort so the
+    // operator can confirm, unless they already acknowledged it.
+    if !acknowledge_cache_mismatch {
+        let mut foreign = Vec::new();
+        for task in &tasks {
+            if let (Some(declared), true) = (task.hash.as_deref(), task.file_path.exists()) {
+                if let Some(on_disk) = sha256_of_file(&task.file_path) {
+                    if on_disk.as_str() != declared {
+                        if let Some(name) = task.file_path.file_name().and_then(|n| n.to_str()) {
+                            foreign.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if !foreign.is_empty() {
+            foreign.sort();
+            return Err(CacheMismatch {
+                engine_type: engine_type.to_string(),
+                version: version.to_string(),
+                jars: foreign,
+            }
+            .into());
+        }
+    }
 
     let _ = on_progress.send(serde_json::json!({
         "message": format!("Checking {} cached files...", tasks.len()),

@@ -111,7 +111,7 @@ const handleLaunchClick = (connection: Connection) => {
   nextTick(() => launchServer(connection))
 }
 
-const { trustCertificate, confirmCertChange } = useConfirmRejectModal()
+const { trustCertificate, confirmCertChange, confirmCacheMismatch } = useConfirmRejectModal()
 
 const launchServer = async (connection: Connection) => {
   const onProgress = new Channel<{ message: string }>()
@@ -124,13 +124,14 @@ const launchServer = async (connection: Connection) => {
     // code 0 = launched, 2 = first-use trust, 3 = cert changed, else = error.
     // Bounded so a cert that changes every handshake can't re-prompt forever.
     let attempts = 0
+    let force = false
     while (true) {
       if (attempts++ > 4) {
         launchError.value = "Launch aborted: the server certificate keeps changing."
         return
       }
       const resp = JSON.parse(
-        await invoke<string>("launch", { id: connection.id, on_progress: onProgress }),
+        await invoke<string>("launch", { id: connection.id, force, on_progress: onProgress }),
       )
       if (resp.code === 0) return
       if (resp.code === 2 || resp.code === 3) {
@@ -146,6 +147,21 @@ const launchServer = async (connection: Connection) => {
         }
         await invoke("set_pin", { connection_id: connection.id, sha256: cert.sha256 })
         connection.pinnedCertSha256 = cert.sha256
+        progressMessage.value = "Connecting..."
+        continue
+      }
+      if (resp.code === 4) {
+        progressMessage.value = "Awaiting cache confirmation..."
+        const approved = await confirmCacheMismatch({
+          engineType: resp.engine_type,
+          version: resp.version,
+          jars: resp.jars,
+        })
+        if (!approved) {
+          launchError.value = "Launch cancelled: cache not overwritten."
+          return
+        }
+        force = true
         progressMessage.value = "Connecting..."
         continue
       }
