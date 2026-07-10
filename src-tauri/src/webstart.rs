@@ -51,10 +51,14 @@ pub struct WebstartFile {
     main_class: String,
     args: Vec<String>,
     j2ses: Option<Vec<J2se>>,
-    jar_dir: PathBuf,
     logs_dir: PathBuf,
     conn_id: String,
     loaded_at: SystemTime,
+    /// Classpath jars in JNLP-declared order. Order is significant: Mirth ships
+    /// patched overlay jars (e.g. `rhino-mc-modifications.jar`) whose classes must
+    /// shadow their stock counterparts, and the JNLP lists each overlay before its
+    /// stock jar. Preserving this order is what makes the overlays win.
+    classpath_jars: Vec<PathBuf>,
 }
 
 /// from jnlp -> resources -> j2se
@@ -161,9 +165,10 @@ impl WebstartFile {
         }
 
         let mut j2ses = None;
+        let mut classpath_jars = Vec::new();
         if let Some(resources_node) = resources_node {
             j2ses = get_j2ses(&resources_node);
-            download_jars(&resources_node, &client, &jar_dir, &base_url, config.on_progress)?;
+            classpath_jars = download_jars(&resources_node, &client, &jar_dir, &base_url, config.on_progress)?;
         }
 
         // Migration: clean up old per-connection cache directory
@@ -184,15 +189,33 @@ impl WebstartFile {
 
         let ws = WebstartFile {
             main_class,
-            jar_dir,
             logs_dir: config.logs_dir.clone(),
             conn_id: safe_conn_id,
             args,
             loaded_at: SystemTime::now(),
             j2ses,
+            classpath_jars,
         };
 
         Ok(ws)
+    }
+
+    /// Build the classpath string, preserving JNLP-declared jar order.
+    ///
+    /// Order is significant: Mirth ships patched overlay jars
+    /// (rhino/fife/jedit/jersey/staxon/zip4j `-mc-modifications.jar`,
+    /// `xpp3-...-modified.jar`) whose classes must shadow their stock
+    /// counterparts, and the JNLP lists each overlay before its stock jar. A
+    /// previous directory scan + alphabetical sort dropped that order (e.g.
+    /// `rhino-1.7.15.1.jar` sorted before `rhino-mc-modifications.jar`), loading
+    /// the stock class first and causing IllegalAccessError at runtime. This
+    /// MUST NOT sort.
+    fn classpath(&self, separator: &str) -> String {
+        self.classpath_jars
+            .iter()
+            .filter_map(|p| p.to_str())
+            .collect::<Vec<_>>()
+            .join(separator)
     }
 
     pub fn run(
@@ -200,59 +223,8 @@ impl WebstartFile {
         ce: Arc<ConnectionEntry>,
         console: Option<crate::console::ConsoleSink>,
     ) -> Result<(), Error> {
-        let mut mirth_jars = Vec::new();
-        let mut other_jars = Vec::new();
-
-        // Collect JARs from core/ and extensions/*/
-        let mut dirs_to_scan = vec![self.jar_dir.join("core")];
-        let ext_dir = self.jar_dir.join("extensions");
-        if ext_dir.exists() {
-            for entry in ext_dir.read_dir()? {
-                let entry = entry?;
-                if entry.metadata()?.is_dir() {
-                    dirs_to_scan.push(entry.path());
-                }
-            }
-        }
-
-        for dir in &dirs_to_scan {
-            if !dir.exists() {
-                continue;
-            }
-            for e in dir.read_dir()? {
-                let e = e?;
-                if e.metadata()?.is_dir() {
-                    continue;
-                }
-                let file_path = e.path();
-                if file_path.extension().and_then(|e| e.to_str()) != Some("jar") {
-                    continue;
-                }
-                let file_name = match file_path.file_name().and_then(|f| f.to_str()) {
-                    Some(name) => name.to_string(),
-                    None => continue,
-                };
-                let file_path_str = match file_path.to_str() {
-                    Some(p) => p.to_string(),
-                    None => continue,
-                };
-
-                // MirthConnect's own jars contain some overridden classes
-                // of the dependent libraries and hence must be loaded first
-                // https://forums.mirthproject.io/forum/mirth-connect/support/15524-using-com-mirth-connect-client-core-client
-                if file_name.starts_with("mirth") {
-                    mirth_jars.push(file_path_str);
-                } else {
-                    other_jars.push(file_path_str);
-                }
-            }
-        }
-
-        mirth_jars.sort();
-        other_jars.sort();
         let classpath_separator = if cfg!(windows) { ";" } else { ":" };
-        mirth_jars.extend(other_jars);
-        let classpath = mirth_jars.join(classpath_separator);
+        let classpath = self.classpath(classpath_separator);
 
         let java_home = ce.java_home.trim();
         let mut cmd = if java_home.is_empty() {
@@ -468,10 +440,16 @@ fn download_jars(
     dir_path: &Path,
     base_url: &str,
     on_progress: &Channel<serde_json::Value>,
-) -> Result<(), Error> {
+) -> Result<Vec<PathBuf>, Error> {
     let mut tasks = Vec::new();
     let core_dir = dir_path.join("core");
     collect_jar_tasks(resources_node, client, &core_dir, base_url, dir_path, &mut tasks, on_progress)?;
+
+    // Classpath order follows the JNLP jar declaration order: JarTasks are
+    // collected in document order (core first, then each extension's jars).
+    // This must NOT be re-sorted; Mirth relies on overlay jars preceding their
+    // stock counterparts. Includes cache-hit jars, not just freshly downloaded.
+    let classpath_jars: Vec<PathBuf> = tasks.iter().map(|t| t.file_path.clone()).collect();
 
     let _ = on_progress.send(serde_json::json!({
         "message": format!("Checking {} cached files...", tasks.len()),
@@ -484,7 +462,7 @@ fn download_jars(
     }
 
     if to_download.is_empty() {
-        return Ok(());
+        return Ok(classpath_jars);
     }
 
     let total = to_download.len();
@@ -507,7 +485,7 @@ fn download_jars(
         }));
     }
 
-    Ok(())
+    Ok(classpath_jars)
 }
 
 /// Collect JAR download tasks from a JNLP resources node.
@@ -688,8 +666,40 @@ fn has_file_changed(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{get_file_name_from_path, is_safe_basename, normalize_url, sanitize_for_path};
+    use super::{get_file_name_from_path, is_safe_basename, normalize_url, sanitize_for_path, WebstartFile};
     use anyhow::Error;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    #[test]
+    fn classpath_preserves_jnlp_order_and_does_not_sort() {
+        // The JNLP lists each patched overlay BEFORE its stock jar. The old
+        // directory-scan + alphabetical sort put rhino-1.7.15.1.jar ahead of
+        // rhino-mc-modifications.jar, loading the stock (package-private)
+        // NativeDate and causing IllegalAccessError. Order must be preserved.
+        let ws = WebstartFile {
+            main_class: "com.example.Main".to_string(),
+            args: vec![],
+            j2ses: None,
+            logs_dir: PathBuf::from("/tmp/logs"),
+            conn_id: "test".to_string(),
+            loaded_at: SystemTime::UNIX_EPOCH,
+            classpath_jars: vec![
+                PathBuf::from("/c/core/rhino-mc-modifications.jar"),
+                PathBuf::from("/c/core/rhino-1.7.15.1.jar"),
+                PathBuf::from("/c/core/mirth-client.jar"),
+            ],
+        };
+        let cp = ws.classpath(":");
+        assert_eq!(
+            cp,
+            "/c/core/rhino-mc-modifications.jar:/c/core/rhino-1.7.15.1.jar:/c/core/mirth-client.jar"
+        );
+        assert!(
+            cp.find("rhino-mc-modifications").unwrap() < cp.find("rhino-1.7.15.1").unwrap(),
+            "patched overlay must precede its stock jar"
+        );
+    }
 
     #[test]
     fn sanitize_for_path_strips_traversal() {
