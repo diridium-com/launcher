@@ -67,6 +67,21 @@ jobs:
           cargo test --locked
           cargo clippy --locked -- -D warnings
 
+      - name: Install cargo-audit (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Rust security audit (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        working-directory: src-tauri
+        # RUSTSEC-2026-0194 and -0195 are quick-xml DoS advisories. The only vulnerable
+        # copy (0.39.4) is pulled at build time by wayland-scanner on Linux, which parses
+        # trusted bundled protocol XML, not runtime input, so it is not reachable. See
+        # issue #10. Remove these ignores once arboard pulls quick-xml >= 0.41.0.
+        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+
       - name: Sync node version and setup cache
         uses: actions/setup-node@v4
         with:
@@ -75,6 +90,10 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm install
+
+      - name: npm security audit (ubuntu only)
+        if: matrix.platform == 'ubuntu-latest'
+        run: npm audit --audit-level=high
 
       - name: Build the app and release
         if: ${{ github.ref == 'refs/heads/master' }}
@@ -127,3 +146,19 @@ jobs:
             src-tauri/target/release/bundle/macos/*.app
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
+
+  # Aggregating gate: one stable check to mark as required in branch protection.
+  # Green only if every leg of the release matrix succeeded.
+  ci-success:
+    name: ci-success
+    needs: [release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all matrix builds succeeded
+        run: |
+          if [ "${{ needs.release.result }}" != "success" ]; then
+            echo "Matrix build did not succeed: ${{ needs.release.result }}"
+            exit 1
+          fi
+          echo "All matrix builds succeeded."
