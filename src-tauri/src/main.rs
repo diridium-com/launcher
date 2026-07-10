@@ -36,7 +36,7 @@ async fn get_launcher_info() -> String {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, wc: State<'_, WebstartCache>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
+async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, wc: State<'_, WebstartCache>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
     let ce = cs.get(&id)
         .ok_or_else(|| format!("connection not found: {}", id))?;
 
@@ -106,11 +106,23 @@ async fn launch(id: String, on_progress: Channel<serde_json::Value>, app: AppHan
                 logs_dir: &logs_dir,
                 on_progress: &on_progress,
                 pinned_cert_sha256,
+                acknowledge_cache_mismatch: force,
             })
         }).await.map_err(|e| e.to_string())?;
 
         match tmp {
             Err(e) => {
+                // A cache/engine collision is a distinct, recoverable outcome:
+                // surface it as code 4 with details so the frontend can confirm
+                // and retry with force=true, instead of a generic error.
+                if let Some(cm) = e.downcast_ref::<crate::webstart::CacheMismatch>() {
+                    return Ok(serde_json::json!({
+                        "code": 4,
+                        "engine_type": cm.engine_type,
+                        "version": cm.version,
+                        "jars": cm.jars,
+                    }).to_string());
+                }
                 let msg = e.to_string();
                 warn!("{}", msg);
                 return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
