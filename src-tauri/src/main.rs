@@ -264,9 +264,9 @@ fn main() {
     // Migrate from legacy directories if they exist
     let legacy_ballista_dir = home_directory.join(".ballista");
     if legacy_ballista_dir.exists() {
-        move_file(legacy_ballista_dir.join("ballista-data.json"), launcher_directory.join("launcher-data.json"));
+        copy_file(legacy_ballista_dir.join("ballista-data.json"), launcher_directory.join("launcher-data.json"));
     } else {
-        move_file(home_directory.join("catapult-data.json"), launcher_directory.join("launcher-data.json"));
+        copy_file(home_directory.join("catapult-data.json"), launcher_directory.join("launcher-data.json"));
     }
 
     let connection_store = ConnectionStore::init(launcher_directory);
@@ -327,11 +327,22 @@ fn console_window_label(conn_id: &str) -> String {
     format!("console-{}", sanitized)
 }
 
-fn move_file(old: PathBuf, new: PathBuf) {
+//fn move_file(old: PathBuf, new: PathBuf) {
+//   if old.exists() && !new.exists() {
+//        if let Err(e) = fs::rename(&old, &new) {
+//            info!(
+//                "failed to move the file from {:?} to {:?} : {}",
+//                old, new, e
+//            );
+//        }
+//    }
+//}
+
+fn copy_file(old: PathBuf, new: PathBuf) {
     if old.exists() && !new.exists() {
-        if let Err(e) = fs::rename(&old, &new) {
+        if let Err(e) = fs::copy(&old, &new) {
             info!(
-                "failed to move the file from {:?} to {:?} : {}",
+                "failed to copy the file from {:?} to {:?} : {}",
                 old, new, e
             );
         }
