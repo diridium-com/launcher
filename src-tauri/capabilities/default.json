@@ -22,7 +22,7 @@
     {
       "identifier": "shell:allow-open",
       "allow": [
-        { "url": "https://github.com/pacmano1/launcher/wiki" }
+        { "url": "https://github.com/diridium-com/launcher/wiki" }
       ]
     }
   ]

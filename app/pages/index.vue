@@ -226,7 +226,7 @@ const openHelp = async () => {
     kind: "info",
   })
   if (confirmed) {
-    await shellOpen("https://github.com/pacmano1/launcher/wiki")
+    await shellOpen("https://github.com/diridium-com/launcher/wiki")
   }
 }
 
