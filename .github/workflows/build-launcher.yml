@@ -80,11 +80,7 @@ jobs:
       - name: Rust security audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         working-directory: src-tauri
-        # RUSTSEC-2026-0194 and -0195 are quick-xml DoS advisories. The only vulnerable
-        # copy (0.39.4) is pulled at build time by wayland-scanner on Linux, which parses
-        # trusted bundled protocol XML, not runtime input, so it is not reachable. See
-        # issue #10. Remove these ignores once arboard pulls quick-xml >= 0.41.0.
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        run: cargo audit
 
       - name: Sync node version and setup cache
         uses: actions/setup-node@v4
