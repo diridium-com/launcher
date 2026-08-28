@@ -267,9 +267,29 @@ impl WebstartFile {
         &self,
         ce: Arc<ConnectionEntry>,
         console: Option<crate::console::ConsoleSink>,
+        icon_bootstrap: Option<(PathBuf, PathBuf)>,
     ) -> Result<(), Error> {
         let classpath_separator = if cfg!(windows) { ";" } else { ":" };
-        let classpath = self.classpath(classpath_separator);
+        let mut classpath = self.classpath(classpath_separator);
+
+        // Dock/taskbar icon for the admin process: prepend the bootstrap jar to
+        // the classpath and start it instead of the admin's main class; it sets
+        // the icon (java.awt.Taskbar, or per-window stamping where unsupported)
+        // and then reflectively invokes the real main. Both paths must exist;
+        // an icon problem must never stop a launch, so anything missing means
+        // we launch the admin directly as before.
+        let mut main_class = self.main_class.as_str();
+        let mut icon_props: Vec<String> = Vec::new();
+        if let Some((ref jar, ref icon)) = icon_bootstrap {
+            if jar.is_file() && icon.is_file() {
+                classpath = format!("{}{}{}", jar.display(), classpath_separator, classpath);
+                icon_props.push(format!("-Dlauncher.icon={}", icon.display()));
+                icon_props.push(format!("-Dlauncher.main={}", self.main_class));
+                main_class = "IconBootstrap";
+            } else {
+                warn!("icon bootstrap resources missing ({:?}, {:?}); launching without custom icon", jar, icon);
+            }
+        }
 
         let java_home = ce.java_home.trim();
         let mut cmd = if java_home.is_empty() {
@@ -306,9 +326,10 @@ impl WebstartFile {
             }
         }
 
+        cmd.args(&icon_props);
         cmd.arg("-cp")
             .arg(classpath)
-            .arg(&self.main_class)
+            .arg(main_class)
             .args(&self.args);
 
         if let Some(ref username) = ce.username {

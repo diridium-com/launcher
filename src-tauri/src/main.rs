@@ -150,7 +150,19 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         .as_ref()
         .map(|s| (s.label.clone(), format!("Console - {}", ce.name)));
 
-    let r = ws.run(ce, console_sink);
+    // Bundled bootstrap jar + default icon for the admin's Dock/taskbar icon.
+    // Resolution failure just means launching without the icon (run() also
+    // double-checks the files exist).
+    let icon_bootstrap = {
+        use tauri::path::BaseDirectory;
+        let jar = app.path().resolve("resources/launcher-bootstrap.jar", BaseDirectory::Resource);
+        let icon = app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource);
+        match (jar, icon) {
+            (Ok(jar), Ok(icon)) => Some((jar, icon)),
+            _ => None,
+        }
+    };
+    let r = ws.run(ce, console_sink, icon_bootstrap);
     if let Err(e) = r {
         let msg = e.to_string();
         warn!("{}", msg);
