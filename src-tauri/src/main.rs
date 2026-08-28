@@ -337,3 +337,43 @@ fn copy_file(old: PathBuf, new: PathBuf) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::copy_file;
+    use std::fs;
+
+    #[test]
+    fn copy_file_copies_and_keeps_the_source() {
+        let dir = std::env::temp_dir().join(format!("launcher-copy-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("ballista-data.json");
+        let dst = dir.join("launcher-data.json");
+        fs::write(&src, b"{\"a\":1}").unwrap();
+
+        copy_file(src.clone(), dst.clone());
+
+        assert_eq!(fs::read(&dst).unwrap(), b"{\"a\":1}");
+        // The legacy config must survive migration (issue #20); the old
+        // move-based migration deleted it.
+        assert!(src.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_file_never_overwrites_an_existing_destination() {
+        let dir = std::env::temp_dir().join(format!("launcher-noclobber-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("ballista-data.json");
+        let dst = dir.join("launcher-data.json");
+        fs::write(&src, b"legacy").unwrap();
+        fs::write(&dst, b"current").unwrap();
+
+        copy_file(src, dst.clone());
+
+        assert_eq!(fs::read(&dst).unwrap(), b"current");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+}
