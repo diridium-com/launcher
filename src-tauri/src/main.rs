@@ -327,17 +327,6 @@ fn console_window_label(conn_id: &str) -> String {
     format!("console-{}", sanitized)
 }
 
-//fn move_file(old: PathBuf, new: PathBuf) {
-//   if old.exists() && !new.exists() {
-//        if let Err(e) = fs::rename(&old, &new) {
-//            info!(
-//                "failed to move the file from {:?} to {:?} : {}",
-//                old, new, e
-//            );
-//        }
-//    }
-//}
-
 fn copy_file(old: PathBuf, new: PathBuf) {
     if old.exists() && !new.exists() {
         if let Err(e) = fs::copy(&old, &new) {
