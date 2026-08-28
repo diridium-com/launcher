@@ -140,6 +140,21 @@ impl ConnectionStore {
             Err(e) => return Err(Error::new(e)),
         }
 
+        // The file holds plaintext passwords but may carry looser permissions:
+        // copied/renamed from a legacy ballista or catapult config with the
+        // source's mode bits, or written before the 0600 hardening. Only the
+        // save path goes through create_private_file, so tighten it here on
+        // every start.
+        #[cfg(unix)]
+        if con_location.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                fs::set_permissions(&con_location, fs::Permissions::from_mode(0o600))
+            {
+                warn!("could not restrict permissions on {:?}: {}", con_location, e);
+            }
+        }
+
         let cache_dir = data_dir_path.join("cache");
         if !cache_dir.exists() {
             fs::create_dir(&cache_dir)?;
@@ -370,6 +385,23 @@ mod tests {
         let _f = create_private_file(&path).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "secrets file must be owner-only (0600)");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn init_tightens_permissions_of_existing_store() {
+        let dir = std::env::temp_dir().join(format!("launcher-init-perm-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("launcher-data.json");
+
+        // Simulate a store migrated from a legacy config with umask-default mode.
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        super::ConnectionStore::init(dir.clone()).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "connection store must be owner-only (0600) after init");
 
         fs::remove_dir_all(&dir).ok();
     }
