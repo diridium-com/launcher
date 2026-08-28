@@ -71,6 +71,11 @@ pub struct ConnectionEntry {
     /// launch prompts the operator (TOFU). Not a secret, so it lives in the JSON.
     #[serde(default, rename = "pinnedCertSha256")]
     pub pinned_cert_sha256: Option<String>,
+    /// Path to a custom Dock/taskbar icon for this connection's admin process.
+    /// None/empty = the bundled default. Validated at launch; a missing file
+    /// falls back to the default rather than failing the launch.
+    #[serde(default, rename = "iconPath")]
+    pub icon_path: Option<String>,
 }
 
 pub struct ConnectionStore {
@@ -98,6 +103,7 @@ impl Default for ConnectionEntry {
             show_console: false,
             engine_type: get_default_engine_type(),
             pinned_cert_sha256: None,
+            icon_path: None,
         }
     }
 }

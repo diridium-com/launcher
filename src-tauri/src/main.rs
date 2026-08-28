@@ -161,7 +161,17 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
     let icon_bootstrap = if java_major.is_some_and(|v| v >= 9) {
         use tauri::path::BaseDirectory;
         let jar = app.path().resolve("resources/launcher-bootstrap.jar", BaseDirectory::Resource);
-        let icon = app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource);
+        // Per-connection icon when set and still on disk, else the bundled
+        // default. A vanished custom icon must not fail the launch.
+        let custom_icon = ce.icon_path.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from);
+        let icon = match custom_icon {
+            Some(p) if p.is_file() => Ok(p),
+            Some(p) => {
+                warn!("connection icon {:?} not found; using the default icon", p);
+                app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource)
+            }
+            None => app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource),
+        };
         match (jar, icon) {
             (Ok(jar), Ok(icon)) => Some((jar, icon)),
             _ => None,
@@ -198,6 +208,28 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
 
     let _ = cs.update_last_connected(&id);
     Ok(serde_json::json!({ "code": 0 }).to_string())
+}
+
+/// Read an image file and return it as a data URI for the connection
+/// settings icon preview. A command (not the asset protocol) so the
+/// webview's CSP stays closed to local file URLs.
+#[tauri::command(rename_all = "snake_case")]
+fn read_icon_preview(path: String) -> Result<String, String> {
+    const MAX_BYTES: u64 = 10 * 1024 * 1024;
+    let p = PathBuf::from(path.trim());
+    let mime = match p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        _ => return Err("unsupported image type (use png, jpg, or gif)".to_string()),
+    };
+    let meta = fs::metadata(&p).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_BYTES {
+        return Err("image is larger than 10MB".to_string());
+    }
+    let bytes = fs::read(&p).map_err(|e| e.to_string())?;
+    use base64::Engine;
+    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -316,6 +348,7 @@ fn main() {
             load_single_connection,
             get_launcher_info,
             set_pin,
+            read_icon_preview,
             console::console_subscribe,
             console::console_save
         ])

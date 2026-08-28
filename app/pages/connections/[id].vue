@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Connection } from "~/types"
 import { invoke } from "@tauri-apps/api/core"
-import { ask } from "@tauri-apps/plugin-dialog"
+import { ask, open } from "@tauri-apps/plugin-dialog"
 
 const route = useRoute()
 const connectionId = route.params.id
@@ -29,6 +29,40 @@ watch(
 )
 
 const errorMessage = ref<string | null>(null)
+
+const iconPreview = ref<string | null>(null)
+const iconError = ref<string | null>(null)
+
+const loadIconPreview = async () => {
+  iconError.value = null
+  if (!server.value.iconPath) {
+    iconPreview.value = null
+    return
+  }
+  try {
+    iconPreview.value = await invoke<string>("read_icon_preview", { path: server.value.iconPath })
+  } catch (e) {
+    iconPreview.value = null
+    iconError.value = `Could not preview icon: ${e}`
+  }
+}
+await loadIconPreview()
+
+const handlePickIcon = async () => {
+  const picked = await open({
+    multiple: false,
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif"] }],
+  })
+  if (typeof picked === "string") {
+    server.value.iconPath = picked
+    await loadIconPreview()
+  }
+}
+
+const handleResetIcon = async () => {
+  server.value.iconPath = null
+  await loadIconPreview()
+}
 
 const handleSave = async () => {
   try {
@@ -100,6 +134,30 @@ const handleDelete = async () => {
               placeholder="Additional JVM options"
               v-model="server.javaArgs"
             ></textarea>
+          </div>
+          <div class="space-y-1">
+            <label class="block text-sm font-medium text-text-secondary select-none">Admin Icon</label>
+            <div class="flex items-center gap-3">
+              <img v-if="iconPreview" :src="iconPreview" class="w-8 h-8 rounded" alt="Connection icon preview" />
+              <p v-else class="text-xs text-text-tertiary select-none">Default</p>
+              <button
+                type="button"
+                class="px-2.5 py-1.5 rounded-md text-xs text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors whitespace-nowrap"
+                @click="handlePickIcon"
+              >
+                Choose…
+              </button>
+              <button
+                v-if="server.iconPath"
+                type="button"
+                class="px-2.5 py-1.5 rounded-md text-xs text-text-secondary hover:bg-surface-2 hover:cursor-pointer transition-colors whitespace-nowrap"
+                @click="handleResetIcon"
+              >
+                Reset
+              </button>
+            </div>
+            <p v-if="iconError" class="text-xs text-danger">{{ iconError }}</p>
+            <p class="text-xs text-text-tertiary select-none">Dock/taskbar icon for this connection's administrator</p>
           </div>
         </section>
 
