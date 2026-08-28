@@ -38,4 +38,4 @@ cargo test
 
 ## Remotes
 
-- `origin` — `pacmano1/launcher` (this project's own repo; separated from upstream `kayyagari/ballista`)
+- `origin` — `diridium-com/launcher` (this project's own repo; transferred from `pacmano1/launcher` on 2026-08-17; separated from upstream `kayyagari/ballista`)
