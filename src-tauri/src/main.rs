@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Arc;
 
-use log::{info, warn};
+use log::warn;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -330,7 +330,7 @@ fn console_window_label(conn_id: &str) -> String {
 fn copy_file(old: PathBuf, new: PathBuf) {
     if old.exists() && !new.exists() {
         if let Err(e) = fs::copy(&old, &new) {
-            info!(
+            warn!(
                 "failed to copy the file from {:?} to {:?} : {}",
                 old, new, e
             );
