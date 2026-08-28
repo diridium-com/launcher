@@ -282,8 +282,14 @@ impl WebstartFile {
         let mut icon_props: Vec<String> = Vec::new();
         if let Some((ref jar, ref icon)) = icon_bootstrap {
             if jar.is_file() && icon.is_file() {
-                classpath = format!("{}{}{}", jar.display(), classpath_separator, classpath);
-                icon_props.push(format!("-Dlauncher.icon={}", icon.display()));
+                // Tauri's resource resolver returns Windows verbatim paths
+                // (\\?\C:\...), which Rust accepts but java's -cp and File do
+                // not; hand java plain paths or the bootstrap class is
+                // silently unloadable.
+                let jar = strip_verbatim_prefix(&jar.display().to_string());
+                let icon = strip_verbatim_prefix(&icon.display().to_string());
+                classpath = format!("{}{}{}", jar, classpath_separator, classpath);
+                icon_props.push(format!("-Dlauncher.icon={}", icon));
                 icon_props.push(format!("-Dlauncher.main={}", self.main_class));
                 main_class = "IconBootstrap";
             } else {
@@ -654,6 +660,18 @@ fn collect_jar_tasks(
 }
 
 /// Filter JNLP java-vm-args to block flags that could execute arbitrary code.
+/// Turn a Windows verbatim path (`\\?\C:\x`, `\\?\UNC\server\share`) into the
+/// plain form java understands. Everything else passes through unchanged.
+fn strip_verbatim_prefix(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = p.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        p.to_string()
+    }
+}
+
 fn sanitize_vm_args(args: &str) -> String {
     let dangerous_prefixes: &[&str] = &[
         "-javaagent:",
@@ -782,11 +800,18 @@ fn classify_cached_jar(jar_file_path: &Path, hash_in_jnlp: Option<&str>) -> (boo
 mod tests {
     use super::{
         classify_cached_jar, get_file_name_from_path, is_safe_basename, normalize_url,
-        sanitize_for_path, sha256_of_file, WebstartFile,
+        sanitize_for_path, sha256_of_file, strip_verbatim_prefix, WebstartFile,
     };
     use anyhow::Error;
     use std::path::PathBuf;
     use std::time::SystemTime;
+
+    #[test]
+    fn strip_verbatim_prefix_yields_java_usable_paths() {
+        assert_eq!(strip_verbatim_prefix(r"\\?\C:\app\boot.jar"), r"C:\app\boot.jar");
+        assert_eq!(strip_verbatim_prefix(r"\\?\UNC\srv\share\boot.jar"), r"\\srv\share\boot.jar");
+        assert_eq!(strip_verbatim_prefix("/opt/launcher/boot.jar"), "/opt/launcher/boot.jar");
+    }
 
     #[test]
     fn classify_cached_jar_detects_foreign_and_missing() {
