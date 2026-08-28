@@ -415,10 +415,27 @@ impl WebstartFile {
     }
 }
 
+/// Parse the major version out of `java -version` output ("1.8.0_392" -> 8,
+/// "17.0.17" -> 17). None when the output doesn't match any known shape.
+fn parse_java_major(output: &str) -> Option<u32> {
+    let start = output.find("version \"")? + "version \"".len();
+    let rest = &output[start..];
+    let quoted = &rest[..rest.find('"')?];
+    let mut parts = quoted.split(['.', '_', '-', '+']);
+    let first = parts.next()?;
+    if first == "1" {
+        parts.next()?.parse().ok()
+    } else {
+        first.parse().ok()
+    }
+}
+
 /// Verify the java binary the connection will use is runnable, before doing any
 /// network work. Resolves the same binary as `run()` (the connection's Java Home
 /// if set, otherwise `java` on PATH) and runs a cheap `java -version`.
-pub fn check_java_available(java_home: &str) -> Result<(), Error> {
+/// On success also reports the parsed major version (None if unparseable) so
+/// the launch can gate version-dependent behavior like the icon bootstrap.
+pub fn check_java_available(java_home: &str) -> Result<Option<u32>, Error> {
     let java_home = java_home.trim();
     let java_bin = if java_home.is_empty() {
         PathBuf::from("java")
@@ -432,7 +449,15 @@ pub fn check_java_available(java_home: &str) -> Result<(), Error> {
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     match cmd.output() {
-        Ok(_) => Ok(()),
+        Ok(out) => {
+            // -version prints to stderr on every JVM I know, but take either.
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            Ok(parse_java_major(&text))
+        }
         Err(_) => {
             let location = if java_home.is_empty() {
                 "on PATH".to_string()
@@ -805,6 +830,16 @@ mod tests {
     use anyhow::Error;
     use std::path::PathBuf;
     use std::time::SystemTime;
+
+    #[test]
+    fn parse_java_major_handles_old_and_new_version_schemes() {
+        use super::parse_java_major;
+        assert_eq!(parse_java_major("java version \"1.8.0_392\"\nJava(TM) SE"), Some(8));
+        assert_eq!(parse_java_major("openjdk version \"17.0.17\" 2025-10-21 LTS"), Some(17));
+        assert_eq!(parse_java_major("openjdk version \"9\"\n"), Some(9));
+        assert_eq!(parse_java_major("openjdk version \"21-ea\" 2023-09-19"), Some(21));
+        assert_eq!(parse_java_major("no version line here"), None);
+    }
 
     #[test]
     fn strip_verbatim_prefix_yields_java_usable_paths() {

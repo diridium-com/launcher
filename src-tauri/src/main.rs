@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Arc;
 
-use log::warn;
+use log::{info, warn};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -45,11 +45,14 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
     let java_ok = tauri::async_runtime::spawn_blocking(move || webstart::check_java_available(&java_home))
         .await
         .map_err(|e| e.to_string())?;
-    if let Err(e) = java_ok {
-        let msg = e.to_string();
-        warn!("{}", msg);
-        return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
-    }
+    let java_major = match java_ok {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = e.to_string();
+            warn!("{}", msg);
+            return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
+        }
+    };
 
     let cache_dir = cs.cache_dir.clone();
     let logs_dir = cs.logs_dir.clone();
@@ -151,9 +154,11 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         .map(|s| (s.label.clone(), format!("Console - {}", ce.name)));
 
     // Bundled bootstrap jar + default icon for the admin's Dock/taskbar icon.
-    // Resolution failure just means launching without the icon (run() also
-    // double-checks the files exist).
-    let icon_bootstrap = {
+    // Gated on Java 9+ (the bootstrap classfile and java.awt.Taskbar need it;
+    // on an older or unidentifiable JVM the admin launches plain, since no
+    // icon always beats a broken launch). Resolution failure likewise just
+    // means launching without the icon (run() also double-checks the files).
+    let icon_bootstrap = if java_major.is_some_and(|v| v >= 9) {
         use tauri::path::BaseDirectory;
         let jar = app.path().resolve("resources/launcher-bootstrap.jar", BaseDirectory::Resource);
         let icon = app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource);
@@ -161,6 +166,9 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
             (Ok(jar), Ok(icon)) => Some((jar, icon)),
             _ => None,
         }
+    } else {
+        info!("skipping icon bootstrap: java major version {:?} (needs 9+)", java_major);
+        None
     };
     let r = ws.run(ce, console_sink, icon_bootstrap);
     if let Err(e) = r {
