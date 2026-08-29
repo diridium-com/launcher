@@ -278,6 +278,13 @@ impl WebstartFile {
         // and then reflectively invokes the real main. Both paths must exist;
         // an icon problem must never stop a launch, so anything missing means
         // we launch the admin directly as before.
+        let java_home = ce.java_home.trim();
+        let java_bin = if java_home.is_empty() {
+            PathBuf::from("java")
+        } else {
+            PathBuf::from(java_home).join("bin").join("java")
+        };
+
         let mut main_class = self.main_class.as_str();
         let mut icon_props: Vec<String> = Vec::new();
         if let Some((ref jar, ref icon)) = icon_bootstrap {
@@ -288,21 +295,29 @@ impl WebstartFile {
                 // silently unloadable.
                 let jar = strip_verbatim_prefix(&jar.display().to_string());
                 let icon = strip_verbatim_prefix(&icon.display().to_string());
-                classpath = format!("{}{}{}", jar, classpath_separator, classpath);
-                icon_props.push(format!("-Dlauncher.icon={}", icon));
-                icon_props.push(format!("-Dlauncher.main={}", self.main_class));
-                main_class = "IconBootstrap";
+                if bootstrap_loads(&java_bin, &jar) {
+                    classpath = format!("{}{}{}", jar, classpath_separator, classpath);
+                    icon_props.push(format!("-Dlauncher.icon={}", icon));
+                    icon_props.push(format!("-Dlauncher.main={}", self.main_class));
+                    // Names the application menu, which otherwise reads "java".
+                    // The bootstrap applies it before AWT starts; macOS ignores
+                    // it after that, and other platforms ignore it entirely.
+                    let name = ce.name.trim();
+                    if !name.is_empty() {
+                        icon_props.push(format!("-Dlauncher.name={}", name));
+                    }
+                    main_class = "IconBootstrap";
+                } else {
+                    // Leaving main_class and classpath untouched is the whole
+                    // point: the admin launches exactly as it would have.
+                    warn!("launching without a custom icon; the admin is unaffected");
+                }
             } else {
                 warn!("icon bootstrap resources missing ({:?}, {:?}); launching without custom icon", jar, icon);
             }
         }
 
-        let java_home = ce.java_home.trim();
-        let mut cmd = if java_home.is_empty() {
-            Command::new("java")
-        } else {
-            Command::new(PathBuf::from(java_home).join("bin").join("java"))
-        };
+        let mut cmd = Command::new(&java_bin);
 
         info!("using java from: {:?}", cmd.get_program().to_str());
 
@@ -427,6 +442,40 @@ fn parse_java_major(output: &str) -> Option<u32> {
         parts.next()?.parse().ok()
     } else {
         first.parse().ok()
+    }
+}
+
+/// Verify java can actually LOAD the bootstrap class from `jar`, before the real
+/// launch commits to it.
+///
+/// `jar.is_file()` only proves the file exists; java additionally has to accept
+/// the path and the class file version. Windows verbatim paths (`\\?\C:\...`)
+/// were exactly this case: the file was present, java could not load from it,
+/// and because the main class had already been swapped the launch died instead
+/// of falling back. This makes that whole category fail safe.
+///
+/// IconBootstrap exits 2 when run without `-Dlauncher.main`, before it touches
+/// AWT or the icon, so exit code 2 means "loaded and ran". Anything else means
+/// do not use it.
+fn bootstrap_loads(java_bin: &Path, jar: &str) -> bool {
+    let mut cmd = Command::new(java_bin);
+    cmd.arg("-cp").arg(jar).arg("IconBootstrap");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    match cmd.output() {
+        Ok(out) if out.status.code() == Some(2) => true,
+        Ok(out) => {
+            warn!(
+                "icon bootstrap not loadable (java exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            warn!("could not probe the icon bootstrap: {}", e);
+            false
+        }
     }
 }
 

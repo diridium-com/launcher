@@ -13,8 +13,9 @@ import javax.imageio.ImageIO;
  * launched admin without touching its jars. Prepend this class's jar/dir to
  * the admin classpath and swap the main class:
  *
- *   java -Dlauncher.icon=/path/to/icon.png -Dlauncher.main=com.mirth.connect.client.ui.Mirth \
- *        -cp <spike-dir>:<admin jars...> IconBootstrap <admin args...>
+ *   java -Dlauncher.icon=/path/to/icon.png -Dlauncher.name="My Server" \
+ *        -Dlauncher.main=com.mirth.connect.client.ui.Mirth \
+ *        -cp <bootstrap.jar>:<admin jars...> IconBootstrap <admin args...>
  *
  * Where the platform supports Taskbar.ICON_IMAGE (macOS Dock, some Linux DEs)
  * the icon is set directly. Otherwise (Windows) an AWT listener stamps every
@@ -26,6 +27,23 @@ public class IconBootstrap {
     public static void main(String[] args) throws Exception {
         String icon = System.getProperty("launcher.icon");
         String mainClass = System.getProperty("launcher.main");
+        String name = System.getProperty("launcher.name");
+
+        // FIRST, before anything can touch AWT: macOS reads this only during
+        // AWT initialization, so setting it later is silently ignored. It
+        // names the application menu, which would otherwise read "java".
+        // Ignored off macOS.
+        //
+        // It does NOT change the Dock icon's hover tooltip, and neither does
+        // the -Xdock:name launcher flag (measured 2026-08-29; the JDK turns
+        // -Xdock:name into this same property). The tooltip comes from
+        // LaunchServices, which falls back to the executable filename for a
+        // process with no app bundle. Unreachable from inside the JVM -- do
+        // not re-try -Xdock:name for it.
+        if (name != null && !name.trim().isEmpty()) {
+            System.setProperty("apple.awt.application.name", name.trim());
+        }
+
         if (mainClass == null || mainClass.isEmpty()) {
             System.err.println("[IconBootstrap] -Dlauncher.main is required");
             System.exit(2);
