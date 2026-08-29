@@ -76,6 +76,14 @@ pub struct ConnectionEntry {
     /// falls back to the default rather than failing the launch.
     #[serde(default, rename = "iconPath")]
     pub icon_path: Option<String>,
+    /// The Phosphor glyph and badge color `icon_path` was composed from, kept
+    /// so the settings picker can restore the selection and recolor it on a
+    /// later visit. Purely picker state: the launched icon always comes from
+    /// `icon_path`, and both are None for a hand-picked image file.
+    #[serde(default, rename = "iconGlyph")]
+    pub icon_glyph: Option<String>,
+    #[serde(default, rename = "iconColor")]
+    pub icon_color: Option<String>,
 }
 
 pub struct ConnectionStore {
@@ -104,6 +112,8 @@ impl Default for ConnectionEntry {
             engine_type: get_default_engine_type(),
             pinned_cert_sha256: None,
             icon_path: None,
+            icon_glyph: None,
+            icon_color: None,
         }
     }
 }

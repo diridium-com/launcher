@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Connection } from "~/types"
 import { invoke } from "@tauri-apps/api/core"
-import { ask, open } from "@tauri-apps/plugin-dialog"
+import { ask } from "@tauri-apps/plugin-dialog"
 
 const route = useRoute()
 const connectionId = route.params.id
@@ -30,116 +30,6 @@ watch(
 
 const errorMessage = ref<string | null>(null)
 
-const presetIcons = await invoke<{ name: string; data: string }[]>("list_preset_icons")
-
-// Full local Phosphor collection (bundled, no network) for the search picker.
-const phCollection = (await import("@iconify-json/ph")).icons as {
-  icons: Record<string, { body: string }>
-}
-
-const iconSearch = ref("")
-const selectedGlyph = ref<string | null>(null)
-const badgeColors = [
-  "#E5484D", "#F76B15", "#FFB224", "#30A46C", "#12A594", "#00A2C7",
-  "#0091FF", "#3E63DD", "#6E56CF", "#8E4EC6", "#CA244D", "#64748B",
-]
-const selectedColor = ref(badgeColors[7])
-
-const searchResults = computed(() => {
-  const q = iconSearch.value.trim().toLowerCase()
-  if (q.length < 2) return []
-  return Object.keys(phCollection.icons).filter((n) => n.includes(q)).slice(0, 48)
-})
-
-const glyphSvg = (name: string) => {
-  const body = phCollection.icons[name]?.body ?? ""
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="20" height="20">${body}</svg>`
-}
-
-const composeAndSave = async (glyphName: string) => {
-  iconError.value = null
-  try {
-    const body = (phCollection.icons[glyphName]?.body ?? "").split("currentColor").join("#ffffff")
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">${body}</svg>`
-    const img = new Image()
-    const loaded = new Promise((resolve, reject) => {
-      img.onload = resolve
-      img.onerror = reject
-    })
-    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
-    await loaded
-    const canvas = document.createElement("canvas")
-    canvas.width = 256
-    canvas.height = 256
-    const ctx = canvas.getContext("2d")!
-    ctx.beginPath()
-    ctx.roundRect(8, 8, 240, 240, 58)
-    ctx.fillStyle = selectedColor.value
-    ctx.fill()
-    ctx.drawImage(img, 48, 48, 160, 160)
-    const dataUrl = canvas.toDataURL("image/png")
-    const path = await invoke<string>("save_connection_icon", {
-      connection_id: server.value.id,
-      png_base64: dataUrl.split(",")[1],
-    })
-    server.value.iconPath = path
-    iconPreview.value = dataUrl
-    selectedGlyph.value = glyphName
-  } catch (e) {
-    iconError.value = `Could not create icon: ${e}`
-  }
-}
-
-const pickColor = async (c: string) => {
-  selectedColor.value = c
-  if (selectedGlyph.value) await composeAndSave(selectedGlyph.value)
-}
-
-const iconPreview = ref<string | null>(null)
-const iconError = ref<string | null>(null)
-
-const isCustomIcon = computed(
-  () => !!server.value.iconPath && !server.value.iconPath.startsWith("preset:"),
-)
-
-const loadIconPreview = async () => {
-  iconError.value = null
-  if (!isCustomIcon.value) {
-    iconPreview.value = null
-    return
-  }
-  try {
-    iconPreview.value = await invoke<string>("read_icon_preview", { path: server.value.iconPath })
-  } catch (e) {
-    iconPreview.value = null
-    iconError.value = `Could not preview icon: ${e}`
-  }
-}
-await loadIconPreview()
-
-const selectPreset = (name: string) => {
-  server.value.iconPath = name === "default" ? null : `preset:${name}`
-  iconPreview.value = null
-  iconError.value = null
-  selectedGlyph.value = null
-}
-
-const isSelectedPreset = (name: string) =>
-  name === "default"
-    ? !server.value.iconPath
-    : server.value.iconPath === `preset:${name}`
-
-const handlePickIcon = async () => {
-  const picked = await open({
-    multiple: false,
-    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif"] }],
-  })
-  if (typeof picked === "string") {
-    server.value.iconPath = picked
-    await loadIconPreview()
-  }
-}
-
 const handleSave = async () => {
   try {
     await invoke("save", { ce: JSON.stringify(server.value) })
@@ -159,6 +49,23 @@ const handleCancel = async () => {
   }
   navigateTo("/")
 }
+
+// Escape mirrors the Cancel button, including its unsaved-changes prompt.
+// An open popover owns Escape first: the marker is still in the DOM when this
+// runs, since Vue flushes the close on the next tick.
+const isCancelling = ref(false)
+const onKeydown = async (e: KeyboardEvent) => {
+  if (e.key !== "Escape" || isCancelling.value) return
+  if (document.querySelector("[data-popover-open]")) return
+  isCancelling.value = true
+  try {
+    await handleCancel()
+  } finally {
+    isCancelling.value = false
+  }
+}
+onMounted(() => window.addEventListener("keydown", onKeydown))
+onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown))
 
 const handleDelete = async () => {
   const confirmed = await ask(
@@ -200,16 +107,25 @@ const handleDelete = async () => {
           <div class="space-y-2 pt-1">
             <p class="text-sm font-medium text-text-secondary select-none">Security</p>
             <template v-if="server.pinnedCertSha256">
-              <p class="text-xs text-text-tertiary select-none">Trusted certificate (SHA-256)</p>
-              <div class="flex items-start gap-2">
-                <p
-                  class="flex-1 font-mono text-xs bg-surface-2 rounded-md px-3 py-2 text-text-secondary break-all leading-relaxed"
-                >
-                  {{ server.pinnedCertSha256 }}
-                </p>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-text-tertiary select-none shrink-0">SHA-256</span>
+                <!-- A readonly input, not a <p>: main.css disables user-select
+                     on body and exempts only inputs, and this value has to be
+                     copyable to be verified out-of-band. Clicking selects the
+                     whole hash; it also scrolls, so the truncation hides
+                     nothing. -->
+                <input
+                  type="text"
+                  readonly
+                  spellcheck="false"
+                  :value="server.pinnedCertSha256"
+                  :title="server.pinnedCertSha256"
+                  class="flex-1 min-w-0 font-mono text-xs bg-surface-2 rounded-md px-2 py-1 text-text-secondary outline-none cursor-text"
+                  @focus="($event.target as HTMLInputElement).select()"
+                />
                 <button
                   type="button"
-                  class="px-2.5 py-1.5 rounded-md text-xs text-danger hover:bg-danger/10 hover:cursor-pointer transition-colors whitespace-nowrap"
+                  class="px-2 py-1 rounded-md text-xs text-danger hover:bg-danger/10 hover:cursor-pointer transition-colors whitespace-nowrap shrink-0"
                   @click="server.pinnedCertSha256 = null"
                 >
                   Forget
@@ -229,72 +145,17 @@ const handleDelete = async () => {
           <div class="space-y-1">
             <label class="block text-sm font-medium text-text-secondary select-none">JVM Arguments</label>
             <textarea
-              class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30 resize-y min-h-16"
+              class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30 resize-y min-h-9"
               placeholder="Additional JVM options"
               v-model="server.javaArgs"
             ></textarea>
           </div>
-          <div class="space-y-1.5">
-            <label class="block text-sm font-medium text-text-secondary select-none">Admin Icon</label>
-            <div class="flex flex-wrap items-center gap-1.5">
-              <button
-                v-for="icon in presetIcons"
-                :key="icon.name"
-                type="button"
-                :title="icon.name"
-                class="rounded-lg p-0.5 hover:cursor-pointer transition-all duration-100"
-                :class="isSelectedPreset(icon.name) ? 'ring-2 ring-accent' : 'opacity-80 hover:opacity-100'"
-                @click="selectPreset(icon.name)"
-              >
-                <img :src="icon.data" class="w-8 h-8 rounded-md" :alt="icon.name" />
-              </button>
-              <button
-                type="button"
-                title="Choose an image file"
-                class="rounded-lg p-0.5 hover:cursor-pointer transition-all duration-100"
-                :class="isCustomIcon ? 'ring-2 ring-accent' : 'opacity-80 hover:opacity-100'"
-                @click="handlePickIcon"
-              >
-                <img v-if="iconPreview" :src="iconPreview" class="w-8 h-8 rounded-md" alt="Custom icon" />
-                <span
-                  v-else
-                  class="flex items-center justify-center w-8 h-8 rounded-md border border-dashed border-border text-text-tertiary text-lg leading-none select-none"
-                >…</span>
-              </button>
-            </div>
-            <input
-              v-model="iconSearch"
-              type="text"
-              placeholder="Search all icons…"
-              class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
-            />
-            <div v-if="searchResults.length" class="flex flex-wrap gap-1 max-h-28 overflow-y-auto text-text-primary">
-              <button
-                v-for="n in searchResults"
-                :key="n"
-                type="button"
-                :title="n"
-                class="flex items-center justify-center size-8 rounded-md hover:bg-surface-2 hover:cursor-pointer transition-colors"
-                :class="selectedGlyph === n ? 'ring-2 ring-accent' : ''"
-                @click="composeAndSave(n)"
-                v-html="glyphSvg(n)"
-              />
-            </div>
-            <p v-else-if="iconSearch.trim().length >= 2" class="text-xs text-text-tertiary select-none">No icons match</p>
-            <div v-if="searchResults.length || selectedGlyph" class="flex flex-wrap items-center gap-1.5">
-              <button
-                v-for="c in badgeColors"
-                :key="c"
-                type="button"
-                class="size-5 rounded-full hover:cursor-pointer transition-all"
-                :class="selectedColor === c ? 'ring-2 ring-accent ring-offset-1' : 'opacity-80 hover:opacity-100'"
-                :style="{ backgroundColor: c }"
-                @click="pickColor(c)"
-              />
-            </div>
-            <p v-if="iconError" class="text-xs text-danger">{{ iconError }}</p>
-            <p class="text-xs text-text-tertiary select-none">Dock/taskbar icon for this connection's administrator</p>
-          </div>
+          <admin-icon-picker
+            :connection-id="server.id"
+            v-model:icon-path="server.iconPath"
+            v-model:icon-glyph="server.iconGlyph"
+            v-model:icon-color="server.iconColor"
+          />
         </section>
 
         <!-- Left column: Authentication -->
@@ -315,14 +176,16 @@ const handleDelete = async () => {
           <connection-input type="text" label="Notes" placeholder="Optional notes" v-model="server.notes" />
           <div class="space-y-2 pt-1">
             <p class="text-sm font-medium text-text-secondary select-none">Options</p>
-            <label class="flex items-center gap-2 text-sm text-text-primary hover:cursor-pointer select-none">
-              <input type="checkbox" class="accent-accent" v-model="server.showConsole" />
-              Show console
-            </label>
-            <label class="flex items-center gap-2 text-sm text-text-primary hover:cursor-pointer select-none">
-              <input type="checkbox" class="accent-accent" v-model="server.donotcache" />
-              Do not cache
-            </label>
+            <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <label class="flex items-center gap-2 text-sm text-text-primary hover:cursor-pointer select-none">
+                <input type="checkbox" class="accent-accent" v-model="server.showConsole" />
+                Show console
+              </label>
+              <label class="flex items-center gap-2 text-sm text-text-primary hover:cursor-pointer select-none">
+                <input type="checkbox" class="accent-accent" v-model="server.donotcache" />
+                Do not cache
+              </label>
+            </div>
           </div>
         </section>
       </form>
