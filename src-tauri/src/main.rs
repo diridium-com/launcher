@@ -170,6 +170,16 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         info!("skipping icon bootstrap: java major version {:?} (needs 9+)", java_major);
         None
     };
+    // The console is a launcher-owned Tauri window, so the admin's
+    // Dock/taskbar icon never reached it and every console showed the launcher
+    // icon. Resolve the same per-connection icon for it, before ws.run()
+    // takes ownership of `ce`.
+    let console_icon = if console_window.is_some() {
+        resolve_connection_icon(&app, ce.icon_path.as_deref())
+    } else {
+        None
+    };
+
     let r = ws.run(ce, console_sink, icon_bootstrap);
     if let Err(e) = r {
         let msg = e.to_string();
@@ -184,13 +194,33 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         app.run_on_main_thread(move || {
             if let Some(w) = app_handle.get_webview_window(&label) {
                 let _ = w.set_focus();
-            } else if let Err(e) =
-                WebviewWindowBuilder::new(&app_handle, label.as_str(), WebviewUrl::default())
-                    .title(title)
-                    .inner_size(760.0, 520.0)
-                    .build()
-            {
-                warn!("failed to create console window: {}", e);
+            } else {
+                // icon() consumes the builder and can fail, so keep a way to
+                // make a fresh one: an icon problem must never stop the
+                // console from opening.
+                let base = || {
+                    WebviewWindowBuilder::new(&app_handle, label.as_str(), WebviewUrl::default())
+                        .title(title.clone())
+                        .inner_size(760.0, 520.0)
+                };
+                let mut builder = base();
+                // Image::from_path reads png/ico only, so a user-picked jpg or
+                // gif just leaves the launcher icon in place.
+                if let Some(ref p) = console_icon {
+                    match tauri::image::Image::from_path(p) {
+                        Ok(img) => match builder.icon(img) {
+                            Ok(b) => builder = b,
+                            Err(e) => {
+                                warn!("could not apply console window icon: {}", e);
+                                builder = base();
+                            }
+                        },
+                        Err(e) => warn!("could not read console icon {:?}: {}", p, e),
+                    }
+                }
+                if let Err(e) = builder.build() {
+                    warn!("failed to create console window: {}", e);
+                }
             }
         })
         .map_err(|e| e.to_string())?;

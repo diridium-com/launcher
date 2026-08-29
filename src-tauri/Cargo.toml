@@ -14,7 +14,10 @@ edition = "2021"
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = ["tray-icon"] }
+# image-png: Image::from_path, used to give each console window its
+# connection's icon (it is a launcher-owned window, so the admin's
+# Dock/taskbar icon does not reach it).
+tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 # the above are added and required by Tauri
