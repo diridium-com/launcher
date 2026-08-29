@@ -161,19 +161,9 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
     let icon_bootstrap = if java_major.is_some_and(|v| v >= 9) {
         use tauri::path::BaseDirectory;
         let jar = app.path().resolve("resources/launcher-bootstrap.jar", BaseDirectory::Resource);
-        // Per-connection icon when set and still on disk, else the bundled
-        // default. A vanished custom icon must not fail the launch.
-        let custom_icon = ce.icon_path.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from);
-        let icon = match custom_icon {
-            Some(p) if p.is_file() => Ok(p),
-            Some(p) => {
-                warn!("connection icon {:?} not found; using the default icon", p);
-                app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource)
-            }
-            None => app.path().resolve("resources/admin-icon.png", BaseDirectory::Resource),
-        };
+        let icon = resolve_connection_icon(&app, ce.icon_path.as_deref());
         match (jar, icon) {
-            (Ok(jar), Ok(icon)) => Some((jar, icon)),
+            (Ok(jar), Some(icon)) => Some((jar, icon)),
             _ => None,
         }
     } else {
@@ -208,6 +198,126 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
 
     let _ = cs.update_last_connected(&id);
     Ok(serde_json::json!({ "code": 0 }).to_string())
+}
+
+/// Bundled preset icons for the admin Dock/taskbar, in display order.
+/// A connection stores `preset:<name>`; the files live in resources/icons/.
+/// Phosphor Icons glyphs (MIT, see resources/icons/LICENSE-phosphor.txt).
+const PRESET_ICONS: [&str; 12] = [
+    "heartbeat", "stethoscope", "shield-check", "database", "plug", "cloud",
+    "globe", "gear", "rocket", "flask", "bug", "lightning",
+];
+
+/// Resolve a `preset:<name>` icon to its bundled file. None for unknown or
+/// unsafe names (the name is data from launcher-data.json, so it is not
+/// trusted to form paths).
+fn resolve_preset_icon(app: &AppHandle, name: &str) -> Option<PathBuf> {
+    use tauri::path::BaseDirectory;
+    if !PRESET_ICONS.contains(&name) {
+        return None;
+    }
+    app.path()
+        .resolve(format!("resources/icons/{}.png", name), BaseDirectory::Resource)
+        .ok()
+        .filter(|p| p.is_file())
+}
+
+/// Resolve a connection's icon selection to a file: `preset:<name>` to the
+/// bundled preset, anything else as a file path, and the bundled default when
+/// nothing is selected or the selection is unavailable. The single resolution
+/// path used by launch, the main screen, and the settings preview, so they
+/// can never disagree. None only if even the bundled default is missing.
+fn resolve_connection_icon(app: &AppHandle, icon_path: Option<&str>) -> Option<PathBuf> {
+    use tauri::path::BaseDirectory;
+    if let Some(sel) = icon_path.map(str::trim).filter(|s| !s.is_empty()) {
+        let resolved = match sel.strip_prefix("preset:") {
+            Some(name) => resolve_preset_icon(app, name),
+            None => Some(PathBuf::from(sel)).filter(|p| p.is_file()),
+        };
+        match resolved {
+            Some(p) => return Some(p),
+            None => warn!("connection icon {:?} unavailable; using the default icon", sel),
+        }
+    }
+    app.path()
+        .resolve("resources/admin-icon.png", BaseDirectory::Resource)
+        .ok()
+        .filter(|p| p.is_file())
+}
+
+/// Data URI of the icon a connection would launch with. Backs the main
+/// screen's connection list.
+#[tauri::command(rename_all = "snake_case")]
+fn get_connection_icon(icon_path: Option<String>, app: AppHandle) -> Result<String, String> {
+    use base64::Engine;
+    let p = resolve_connection_icon(&app, icon_path.as_deref()).ok_or("no icon available")?;
+    let mime = match p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        _ => "image/png",
+    };
+    let bytes = fs::read(&p).map_err(|e| e.to_string())?;
+    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// Persist an icon composed in the settings page (canvas PNG) for a
+/// connection, into <data dir>/icons/<id>.png. Returns the path to store in
+/// iconPath.
+#[tauri::command(rename_all = "snake_case")]
+fn save_connection_icon(connection_id: String, png_base64: String, cs: State<ConnectionStore>) -> Result<String, String> {
+    use base64::Engine;
+    let sanitized: String = connection_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        return Err("bad connection id".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 5 * 1024 * 1024 {
+        return Err("icon too large".to_string());
+    }
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Err("not a png".to_string());
+    }
+    let dir = cs
+        .cache_dir
+        .parent()
+        .ok_or("no data directory")?
+        .join("icons");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.png", sanitized));
+    fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// List the bundled preset icons as (name, data URI) pairs for the settings
+/// page grid. Reads the bundled files so the grid and the launched icon can
+/// never disagree.
+#[tauri::command]
+fn list_preset_icons(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine;
+    let mut out = Vec::new();
+    // First entry is the bundled default (selecting it clears iconPath).
+    if let Ok(p) = app.path().resolve("resources/admin-icon.png", tauri::path::BaseDirectory::Resource) {
+        if let Ok(bytes) = fs::read(&p) {
+            out.push(serde_json::json!({
+                "name": "default",
+                "data": format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)),
+            }));
+        }
+    }
+    for name in PRESET_ICONS {
+        let Some(p) = resolve_preset_icon(&app, name) else { continue };
+        let bytes = fs::read(&p).map_err(|e| e.to_string())?;
+        out.push(serde_json::json!({
+            "name": name,
+            "data": format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)),
+        }));
+    }
+    Ok(out)
 }
 
 /// Read an image file and return it as a data URI for the connection
@@ -349,6 +459,9 @@ fn main() {
             get_launcher_info,
             set_pin,
             read_icon_preview,
+            list_preset_icons,
+            get_connection_icon,
+            save_connection_icon,
             console::console_subscribe,
             console::console_save
         ])

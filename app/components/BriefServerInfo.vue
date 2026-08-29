@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { LandingScreenServerStatus } from "~/enums"
 import type { Connection } from "~/types"
+import { invoke } from "@tauri-apps/api/core"
 
 const avatarColors = [
   "bg-blue-600",
@@ -45,6 +46,25 @@ const formatRelativeTime = (timestamp: number | null): string => {
 
 const lastConnectedLabel = computed(() => formatRelativeTime(props.server.lastConnected))
 
+// Chosen admin icon for this connection; null (no selection) keeps the
+// initials avatar rather than showing every row with the default icon.
+const iconSrc = ref<string | null>(null)
+watch(
+  () => props.server.iconPath,
+  async (p) => {
+    if (!p) {
+      iconSrc.value = null
+      return
+    }
+    try {
+      iconSrc.value = await invoke<string>("get_connection_icon", { icon_path: p })
+    } catch {
+      iconSrc.value = null
+    }
+  },
+  { immediate: true },
+)
+
 const currentStatus = computed(() => props.status ?? LandingScreenServerStatus.PENDING)
 const isAvailable = computed(() => currentStatus.value === LandingScreenServerStatus.AVAILABLE)
 </script>
@@ -57,7 +77,9 @@ const isAvailable = computed(() => currentStatus.value === LandingScreenServerSt
     @dblclick="emit('launch')"
   >
     <section class="flex-1 flex items-center gap-3 min-w-0">
+      <img v-if="iconSrc" :src="iconSrc" class="flex-none size-8 rounded-md" :alt="`${server.name} icon`" />
       <div
+        v-else
         class="flex-none flex items-center justify-center font-semibold text-white size-8 rounded-md text-xs"
         :class="avatarColor"
       >

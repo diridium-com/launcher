@@ -15,7 +15,8 @@
       "icons/icon.png"
     ],
     "resources": [
-      "resources/*"
+      "resources/*",
+      "resources/icons/*"
     ]
   },
   "productName": "Launcher",
