@@ -180,6 +180,8 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         None
     };
 
+    write_desktop_entry(&app, &ce);
+
     let r = ws.run(ce, console_sink, icon_bootstrap);
     if let Err(e) = r {
         let msg = e.to_string();
@@ -423,6 +425,7 @@ fn save(ce: &str, cs: State<ConnectionStore>) -> Result<String, String> {
 #[tauri::command]
 fn delete(id: &str, cs: State<ConnectionStore>) -> Result<String, String> {
     cs.delete(id).map_err(|e| e.to_string())?;
+    remove_desktop_entry(id);
     Ok(String::from("success"))
 }
 
@@ -515,6 +518,76 @@ fn main() {
 /// Tauri labels allow only `[a-zA-Z0-9-/:_]`; sanitize anything else. The
 /// `console-` prefix is what the frontend (app.vue) and the console capability
 /// glob (`console-*`) match on.
+/// GNOME (and Ubuntu Dock) choose a window's icon by matching its WM_CLASS
+/// against an installed .desktop entry, ignoring the icon the window sets on
+/// itself. So each connection needs its own entry, paired with the WM_CLASS
+/// the bootstrap stamps on the admin's windows. `NoDisplay` keeps it out of
+/// the application grid: it exists only to be matched, never launched.
+///
+/// ~/.local/share/applications is the only place the desktop environment
+/// looks, which makes this the one thing the launcher writes outside its own
+/// directory. `remove_desktop_entry` takes it back out on delete. This is the
+/// same mechanism Chrome uses for installed web apps.
+fn desktop_entry_path(conn_id: &str) -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let base = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+        Some(p) if p.is_absolute() => p,
+        _ => home::home_dir()?.join(".local").join("share"),
+    };
+    Some(base
+        .join("applications")
+        .join(format!("{}.desktop", webstart::wm_class(conn_id))))
+}
+
+fn write_desktop_entry(app: &AppHandle, ce: &ConnectionEntry) {
+    let Some(path) = desktop_entry_path(&ce.id) else { return };
+    let Some(icon) = resolve_connection_icon(app, ce.icon_path.as_deref()) else { return };
+    if let Some(dir) = path.parent() {
+        if let Err(e) = fs::create_dir_all(dir) {
+            warn!("could not create {:?}: {}", dir, e);
+            return;
+        }
+    }
+    let content = desktop_entry_content(&ce.name, &icon, &webstart::wm_class(&ce.id));
+    if let Err(e) = fs::write(&path, content) {
+        warn!("could not write {:?}: {}", path, e);
+    }
+}
+
+/// Body of the .desktop entry. Split out so it can be tested on any platform;
+/// the write path itself only runs on Linux.
+fn desktop_entry_content(name: &str, icon: &std::path::Path, wm_class: &str) -> String {
+    // Every value is a single line, so a newline in the connection name would
+    // inject an arbitrary key into the entry.
+    let name = match name.trim() {
+        "" => "Administrator".to_string(),
+        n => n.replace(['\n', '\r'], " "),
+    };
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={}\n\
+         Icon={}\n\
+         Exec=false\n\
+         StartupWMClass={}\n\
+         NoDisplay=true\n",
+        name,
+        icon.display(),
+        wm_class,
+    )
+}
+
+fn remove_desktop_entry(conn_id: &str) {
+    let Some(path) = desktop_entry_path(conn_id) else { return };
+    match fs::remove_file(&path) {
+        Ok(()) => info!("removed {:?}", path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("could not remove {:?}: {}", path, e),
+    }
+}
+
 fn console_window_label(conn_id: &str) -> String {
     let sanitized: String = conn_id
         .chars()
@@ -536,6 +609,49 @@ fn copy_file(old: PathBuf, new: PathBuf) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn desktop_entry_pairs_the_icon_with_the_wm_class() {
+        let out = super::desktop_entry_content(
+            "Production East",
+            std::path::Path::new("/home/u/.launcher/icons/abc.png"),
+            "launcher-abc",
+        );
+        // GNOME matches on StartupWMClass and then uses Icon; both must be
+        // present or the admin falls back to a generic icon.
+        assert!(out.contains("StartupWMClass=launcher-abc\n"), "{}", out);
+        assert!(out.contains("Icon=/home/u/.launcher/icons/abc.png\n"), "{}", out);
+        assert!(out.contains("Name=Production East\n"), "{}", out);
+        // Never shown in the application grid; it exists only to be matched.
+        assert!(out.contains("NoDisplay=true\n"), "{}", out);
+        assert!(out.starts_with("[Desktop Entry]\n"), "{}", out);
+    }
+
+    #[test]
+    fn desktop_entry_keeps_a_newline_in_the_name_from_injecting_a_key() {
+        let out = super::desktop_entry_content(
+            "Prod\nExec=/bin/sh -c evil",
+            std::path::Path::new("/tmp/i.png"),
+            "launcher-x",
+        );
+        assert!(!out.contains("\nExec=/bin/sh"), "name injected a key: {}", out);
+        assert!(out.contains("Exec=false\n"), "{}", out);
+    }
+
+    #[test]
+    fn desktop_entry_falls_back_to_a_name_when_the_connection_has_none() {
+        let out = super::desktop_entry_content("   ", std::path::Path::new("/tmp/i.png"), "launcher-x");
+        assert!(out.contains("Name=Administrator\n"), "{}", out);
+    }
+
+    #[test]
+    fn wm_class_is_stable_and_free_of_characters_that_break_matching() {
+        let a = crate::webstart::wm_class("2f9c-4d1e-8a7b");
+        assert_eq!(a, "launcher-2f9c-4d1e-8a7b");
+        assert_eq!(a, crate::webstart::wm_class("2f9c-4d1e-8a7b"), "must be stable across launches");
+        assert_eq!(crate::webstart::wm_class("a b/c.d"), "launcher-a-b-c-d");
+    }
+
     use super::copy_file;
     use std::fs;
 

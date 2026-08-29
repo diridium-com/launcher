@@ -44,6 +44,27 @@ public class IconBootstrap {
             System.setProperty("apple.awt.application.name", name.trim());
         }
 
+        // X11 (GNOME especially) picks a window's icon by matching WM_CLASS
+        // against an installed .desktop file, ignoring the icon the window
+        // sets on itself. WM_CLASS defaults to the main class, so every admin
+        // looked identical. Give each connection its own, to pair with the
+        // .desktop entry the launcher writes.
+        //
+        // Must run AFTER getDefaultToolkit() (XToolkit.init sets this field
+        // itself) and BEFORE the first window is created. Off X11 the field
+        // does not exist and this quietly does nothing.
+        String wmClass = System.getProperty("launcher.wmclass");
+        if (wmClass != null && !wmClass.trim().isEmpty()) {
+            try {
+                Toolkit tk = Toolkit.getDefaultToolkit();
+                java.lang.reflect.Field f = tk.getClass().getDeclaredField("awtAppClassName");
+                f.setAccessible(true);
+                f.set(tk, wmClass.trim());
+            } catch (Throwable t) {
+                System.out.println("[IconBootstrap] WM_CLASS not set (" + t + ")");
+            }
+        }
+
         if (mainClass == null || mainClass.isEmpty()) {
             System.err.println("[IconBootstrap] -Dlauncher.main is required");
             System.exit(2);

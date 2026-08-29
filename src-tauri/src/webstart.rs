@@ -306,6 +306,18 @@ impl WebstartFile {
                     if !name.is_empty() {
                         icon_props.push(format!("-Dlauncher.name={}", name));
                     }
+                    // X11 only: give this admin its own WM_CLASS so GNOME can
+                    // pair it with the per-connection .desktop entry. The
+                    // add-opens is what lets the bootstrap reach
+                    // XToolkit.awtAppClassName on Java 9+; it is Linux-gated
+                    // because sun.awt.X11 does not exist in java.desktop on
+                    // the other platforms, where it would only print a warning.
+                    if cfg!(target_os = "linux") {
+                        icon_props.push(format!("-Dlauncher.wmclass={}", wm_class(&ce.id)));
+                        icon_props.push(
+                            "--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED".to_string(),
+                        );
+                    }
                     main_class = "IconBootstrap";
                 } else {
                     // Leaving main_class and classpath untouched is the whole
@@ -443,6 +455,17 @@ fn parse_java_major(output: &str) -> Option<u32> {
     } else {
         first.parse().ok()
     }
+}
+
+/// WM_CLASS for a connection's admin windows, matching the StartupWMClass of
+/// the .desktop entry the launcher writes on Linux. Derived from the
+/// connection id so it is stable across launches and unique per connection.
+pub fn wm_class(conn_id: &str) -> String {
+    let sanitized: String = conn_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    format!("launcher-{}", sanitized)
 }
 
 /// Verify java can actually LOAD the bootstrap class from `jar`, before the real
