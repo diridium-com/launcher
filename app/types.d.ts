@@ -14,6 +14,9 @@ export interface Connection {
   showConsole: boolean
   engineType: string
   pinnedCertSha256: string | null
+  iconPath: string | null
+  iconGlyph: string | null
+  iconColor: string | null
 }
 
 // Server leaf certificate details shown in the trust prompt. `sha256` (hex) is

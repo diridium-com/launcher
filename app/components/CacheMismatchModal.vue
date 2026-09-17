@@ -34,23 +34,25 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey))
               <icon name="ph:warning-octagon" class="text-lg text-danger" />
             </div>
             <div class="min-w-0">
-              <h2 class="text-base font-semibold text-danger">Cached files don't match this server</h2>
+              <h2 class="text-base font-semibold text-danger">Cached engine files don't match this server</h2>
               <p class="text-sm text-text-secondary mt-0.5">
-                The cache for engine type "{{ engineType }}", version {{ version }}, holds files whose
-                contents differ from what this server sent.
+                The cache for engine type "{{ engineType }}", version {{ version }}, holds core engine
+                files whose contents differ from what this server sent.
               </p>
             </div>
           </header>
 
           <div class="space-y-3 text-sm">
             <p class="text-text-secondary">
-              The same engine version always ships the same files. A mismatch usually means another
-              connection has this engine type but points at a different engine, so they share one cache.
-              Continue to re-download the files for this connection, or cancel to fix the engine type.
+              A given engine version always ships the same core files, so this usually means another
+              connection uses this engine type and version but points at a different engine, and the two
+              share one cache directory. Continuing overwrites the cache for this connection, which the
+              other connection will then overwrite on its next launch. Cancelling and giving one of them
+              its own engine type fixes it for good.
             </p>
             <div>
               <p class="text-xs uppercase tracking-wider text-text-tertiary">
-                Differing files ({{ jars.length }})
+                Differing core files ({{ jars.length }})
               </p>
               <ul
                 class="font-mono text-xs bg-surface-2 rounded-md px-3 py-2 text-text-secondary max-h-40 overflow-y-auto space-y-0.5 leading-relaxed"

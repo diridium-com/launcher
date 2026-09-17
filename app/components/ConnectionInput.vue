@@ -5,7 +5,10 @@ defineProps<{
   label?: string
   type: string
   placeholder?: string
-  hint?: string
+  /// Short annotation shown alongside the label rather than on its own line,
+  /// so it costs no height. For anything longer than a few words, put it in
+  /// the page instead.
+  note?: string
 }>()
 
 const inputId = useId()
@@ -13,13 +16,15 @@ const inputId = useId()
 
 <template>
   <div class="space-y-1">
-    <label
-      :for="inputId"
-      v-if="label"
-      class="block text-sm font-medium text-text-secondary select-none"
-    >
-      {{ label }}
-    </label>
+    <div v-if="label" class="flex items-baseline justify-between gap-2">
+      <label
+        :for="inputId"
+        class="block text-sm font-medium text-text-secondary select-none"
+      >
+        {{ label }}
+      </label>
+      <span v-if="note" class="text-xs text-text-tertiary select-none shrink-0">{{ note }}</span>
+    </div>
     <input
       :id="inputId"
       :type="type"
@@ -27,6 +32,5 @@ const inputId = useId()
       class="w-full bg-surface-1 border border-border rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-disabled outline-none transition-colors duration-100 focus:border-border-focus focus:ring-1 focus:ring-accent/30"
       v-model="model"
     />
-    <p v-if="hint" class="text-xs text-text-tertiary select-none">{{ hint }}</p>
   </div>
 </template>

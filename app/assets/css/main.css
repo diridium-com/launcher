@@ -97,6 +97,10 @@ input, textarea {
 /* ─── Custom Scrollbar ─── */
 ::-webkit-scrollbar {
   width: 6px;
+  /* height is the horizontal bar's thickness. Without it a sideways-scrolling
+     element falls back to the default ~15px bar, which does not match the
+     styled vertical one. */
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {

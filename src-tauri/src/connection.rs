@@ -71,6 +71,20 @@ pub struct ConnectionEntry {
     /// launch prompts the operator (TOFU). Not a secret, so it lives in the JSON.
     #[serde(default, rename = "pinnedCertSha256")]
     pub pinned_cert_sha256: Option<String>,
+    /// Path to this connection's custom icon, shown in the launcher's own
+    /// surfaces (the connection list and its console window). None/empty means
+    /// the bundled default. A missing file falls back to the default rather
+    /// than failing anything.
+    #[serde(default, rename = "iconPath")]
+    pub icon_path: Option<String>,
+    /// The Phosphor glyph and badge colour `icon_path` was composed from, kept
+    /// so the picker can restore the selection and recolour it on a later
+    /// visit. Purely picker state: the icon that gets used always comes from
+    /// `icon_path`, and both are None for a hand-picked image file.
+    #[serde(default, rename = "iconGlyph")]
+    pub icon_glyph: Option<String>,
+    #[serde(default, rename = "iconColor")]
+    pub icon_color: Option<String>,
 }
 
 pub struct ConnectionStore {
@@ -98,6 +112,9 @@ impl Default for ConnectionEntry {
             show_console: false,
             engine_type: get_default_engine_type(),
             pinned_cert_sha256: None,
+            icon_path: None,
+            icon_glyph: None,
+            icon_color: None,
         }
     }
 }
@@ -218,9 +235,60 @@ impl ConnectionStore {
         Ok(data)
     }
 
+    /// Removes the connection, then the per-connection files that nothing will
+    /// reference again: its isolated (do-not-cache) jar directory, its launch
+    /// log, and its saved icon. All are keyed by the connection id, so once the
+    /// entry is gone there is no way to reach them from the UI and they sit on
+    /// disk forever. An isolated cache dir runs to ~90MB.
+    ///
+    /// The shared `<engine-type>/<version>` cache is deliberately left alone:
+    /// other connections use it.
+    ///
+    /// If an administrator launched from this connection is still running with
+    /// do-not-cache on, removing its jar directory pulls classes out from under
+    /// it. That is the same hazard the launch path already creates, since it
+    /// wipes and repopulates this directory on every do-not-cache launch.
+    ///
+    /// Cleanup failures are logged rather than returned: the connection is
+    /// already gone by then, and failing the command would misreport that.
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         self.con_cache.lock().expect("connection cache lock poisoned").remove(id);
         self.write_connections_to_disk()?;
+
+        let isolated = self
+            .cache_dir
+            .join("_isolated")
+            .join(crate::webstart::sanitize_for_path(id));
+        if isolated.exists() {
+            if let Err(e) = fs::remove_dir_all(&isolated) {
+                warn!("could not remove {:?}: {}", isolated, e);
+            }
+        }
+
+        // The launch path names the log with the RAW id, not the sanitized one.
+        let log = self.logs_dir.join(format!("{}.log", id));
+        if log.exists() {
+            if let Err(e) = fs::remove_file(&log) {
+                warn!("could not remove {:?}: {}", log, e);
+            }
+        }
+
+        // save_connection_icon writes <data dir>/icons/<id>.png, sanitizing the
+        // id the same way. Only a composed icon lives there; a hand-picked
+        // image file stays wherever the operator keeps it.
+        if let Some(data_dir) = self.cache_dir.parent() {
+            let icon = data_dir.join("icons").join(format!(
+                "{}.png",
+                id.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                    .collect::<String>()
+            ));
+            if icon.exists() {
+                if let Err(e) = fs::remove_file(&icon) {
+                    warn!("could not remove {:?}: {}", icon, e);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -368,9 +436,50 @@ fn get_default_engine_type() -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::create_private_file;
+    use super::{create_private_file, ConnectionStore};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    /// delete() has to remove the per-connection files, because once the entry
+    /// is gone nothing can reach them: an isolated cache dir runs to ~90MB and
+    /// would sit there forever. Equally it must NOT touch the shared
+    /// <engine-type>/<version> cache, which other connections launch from.
+    #[test]
+    fn delete_removes_per_connection_files_but_not_the_shared_cache() {
+        let data_dir = std::env::temp_dir().join(format!("launcher-del-{}", std::process::id()));
+        fs::remove_dir_all(&data_dir).ok();
+        fs::create_dir_all(&data_dir).expect("create data dir");
+        let store = ConnectionStore::init(data_dir.clone()).expect("init store");
+
+        let id = "1234abcd-0000-1111-2222-333344445555";
+        let isolated = store.cache_dir.join("_isolated").join(id);
+        fs::create_dir_all(&isolated).expect("isolated dir");
+        fs::write(isolated.join("some.jar"), b"jar").expect("jar");
+
+        fs::create_dir_all(&store.logs_dir).expect("logs dir");
+        let log = store.logs_dir.join(format!("{}.log", id));
+        fs::write(&log, b"log").expect("log");
+
+        let icons = data_dir.join("icons");
+        fs::create_dir_all(&icons).expect("icons dir");
+        let icon = icons.join(format!("{}.png", id));
+        fs::write(&icon, b"png").expect("icon");
+
+        // Shared cache for an engine type + version: must survive.
+        let shared = store.cache_dir.join("open-integration-engine").join("4_6_0").join("core");
+        fs::create_dir_all(&shared).expect("shared dir");
+        let shared_jar = shared.join("mirth-client.jar");
+        fs::write(&shared_jar, b"jar").expect("shared jar");
+
+        store.delete(id).expect("delete");
+
+        assert!(!isolated.exists(), "isolated cache dir should be removed");
+        assert!(!log.exists(), "launch log should be removed");
+        assert!(!icon.exists(), "saved icon should be removed");
+        assert!(shared_jar.is_file(), "shared cache must NOT be touched");
+
+        fs::remove_dir_all(&data_dir).ok();
+    }
 
     #[test]
     fn create_private_file_enforces_owner_only_even_if_preexisting() {
