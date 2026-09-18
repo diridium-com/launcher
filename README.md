@@ -4,13 +4,24 @@ A lean and simple launcher for Open Integration Engine administration.
 
 Originally forked from [Ballista](https://github.com/kayyagari/ballista) by [Kiran Ayyagari](https://github.com/kayyagari). Thank you Kiran for the original project and foundation this builds upon.
 
+> ### Consider the OIE web administrator
+>
+> Open Integration Engine now has a **browser-based administrator**, with nothing to install on
+> each workstation.
+>
+> ### **https://openintegrationengine.org/web-administrator/**
+>
+> Worth evaluating before you commit to a desktop launcher. Launcher remains useful if you manage
+> many engines from one machine, or need a native app, but for a lot of people the web
+> administrator is the simpler answer.
+
 ## How To Use
 
 1. Go to releases and download a suitable installer for your OS platform
 2. Create a new connection or import existing connections from `<MCAL-root>/data/connections.json`
 3. Launch a connection by double-clicking the desired server, or select it and click the play button
 4. Edit a connection by clicking the pencil icon on a server row
-5. Adjust the `Java Home` field's value if necessary (JRE version 8 or higher must be installed)
+5. Adjust the `Java Home` field's value if necessary. The administrator needs a **JavaFX-enabled JDK**; a plain JRE will not run it.
 
 ## Features
 
@@ -18,7 +29,7 @@ Originally forked from [Ballista](https://github.com/kayyagari/ballista) by [Kir
 - Real-time server connectivity status
 - Sort by group, name, last connected, or status
 - Java console output viewer
-- Jar signature verification with certificate trust management
+- Per-connection TLS certificate pinning (trust on first use), for the self-signed certificates these servers usually carry
 - Cross-platform: macOS, Windows, Linux
 
 ## Compiling
