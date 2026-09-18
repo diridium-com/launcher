@@ -8,7 +8,6 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
-use std::sync::Arc;
 
 use log::warn;
 use tauri::ipc::Channel;
@@ -16,7 +15,7 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::connection::{ConnectionEntry, ConnectionStore};
 use crate::console::ConsoleRegistry;
-use crate::webstart::{LoadConfig, WebstartCache, WebstartFile};
+use crate::webstart::{LoadConfig, WebstartFile};
 
 mod connection;
 mod console;
@@ -36,7 +35,7 @@ async fn get_launcher_info() -> String {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, wc: State<'_, WebstartCache>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
+async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
     let ce = cs.get(&id)
         .ok_or_else(|| format!("connection not found: {}", id))?;
 
@@ -88,53 +87,51 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         Some(_) => {}
     }
 
-    let mut ws = wc.get(&address);
-    if ws.is_none() {
-        let tmp = tauri::async_runtime::spawn_blocking({
-            let on_progress = on_progress.clone();
-            let address = address.clone();
-            let cache_dir = cache_dir.clone();
-            let logs_dir = logs_dir.clone();
-            let pinned_cert_sha256 = pin.clone();
-            move || WebstartFile::load(LoadConfig {
-                base_url: &address,
-                cache_dir: &cache_dir,
-                donotcache,
-                conn_id: &conn_id,
-                conn_name: &conn_name,
-                engine_type: &engine_type,
-                logs_dir: &logs_dir,
-                on_progress: &on_progress,
-                pinned_cert_sha256,
-                acknowledge_cache_mismatch: force,
-            })
-        }).await.map_err(|e| e.to_string())?;
+    // Every launch re-fetches the JNLP and re-verifies the cached jars. An
+    // in-memory WebstartFile cache used to short-circuit this for 120s, but
+    // skipping load() also skipped the hash check, so a jar or a JNLP that
+    // changed between two launches went unnoticed. The only people who relaunch
+    // inside that window are the ones upgrading an engine or installing
+    // extensions, which is exactly what the check exists to catch.
+    let loaded = tauri::async_runtime::spawn_blocking({
+        let on_progress = on_progress.clone();
+        let address = address.clone();
+        let cache_dir = cache_dir.clone();
+        let logs_dir = logs_dir.clone();
+        let pinned_cert_sha256 = pin.clone();
+        move || WebstartFile::load(LoadConfig {
+            base_url: &address,
+            cache_dir: &cache_dir,
+            donotcache,
+            conn_id: &conn_id,
+            conn_name: &conn_name,
+            engine_type: &engine_type,
+            logs_dir: &logs_dir,
+            on_progress: &on_progress,
+            pinned_cert_sha256,
+            acknowledge_cache_mismatch: force,
+        })
+    }).await.map_err(|e| e.to_string())?;
 
-        match tmp {
-            Err(e) => {
-                // A cache/engine collision is a distinct, recoverable outcome:
-                // surface it as code 4 with details so the frontend can confirm
-                // and retry with force=true, instead of a generic error.
-                if let Some(cm) = e.downcast_ref::<crate::webstart::CacheMismatch>() {
-                    return Ok(serde_json::json!({
-                        "code": 4,
-                        "engine_type": cm.engine_type,
-                        "version": cm.version,
-                        "jars": cm.jars,
-                    }).to_string());
-                }
-                let msg = e.to_string();
-                warn!("{}", msg);
-                return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
+    let ws = match loaded {
+        Err(e) => {
+            // A cache/engine collision is a distinct, recoverable outcome:
+            // surface it as code 4 with details so the frontend can confirm
+            // and retry with force=true, instead of a generic error.
+            if let Some(cm) = e.downcast_ref::<crate::webstart::CacheMismatch>() {
+                return Ok(serde_json::json!({
+                    "code": 4,
+                    "engine_type": cm.engine_type,
+                    "version": cm.version,
+                    "jars": cm.jars,
+                }).to_string());
             }
-            Ok(wf) => {
-                let wf = Arc::new(wf);
-                wc.put(&address, Arc::clone(&wf));
-                ws = Some(wf);
-            }
+            let msg = e.to_string();
+            warn!("{}", msg);
+            return Ok(serde_json::json!({ "code": -1, "msg": msg }).to_string());
         }
-    }
-    let ws = ws.expect("WebstartFile should be loaded at this point");
+        Ok(wf) => wf,
+    };
     let _ = on_progress.send(serde_json::json!({"message": "Launching administrator..."}));
     let console_sink = if ce.show_console {
         let label = console_window_label(&ce.id);
@@ -149,6 +146,14 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
     let console_window = console_sink
         .as_ref()
         .map(|s| (s.label.clone(), format!("Console - {}", ce.name)));
+    // The console is a launcher-owned Tauri window, so it shows the launcher
+    // icon by default. Give it the connection's icon, resolved before ws.run()
+    // takes ownership of `ce`.
+    let console_icon = if console_window.is_some() {
+        resolve_connection_icon(&app, ce.icon_path.as_deref())
+    } else {
+        None
+    };
 
     let r = ws.run(ce, console_sink);
     if let Err(e) = r {
@@ -164,13 +169,33 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
         app.run_on_main_thread(move || {
             if let Some(w) = app_handle.get_webview_window(&label) {
                 let _ = w.set_focus();
-            } else if let Err(e) =
-                WebviewWindowBuilder::new(&app_handle, label.as_str(), WebviewUrl::default())
-                    .title(title)
-                    .inner_size(760.0, 520.0)
-                    .build()
-            {
-                warn!("failed to create console window: {}", e);
+            } else {
+                // icon() consumes the builder and can fail, so keep a way to
+                // make a fresh one: an icon problem must never stop the console
+                // from opening.
+                let base = || {
+                    WebviewWindowBuilder::new(&app_handle, label.as_str(), WebviewUrl::default())
+                        .title(title.clone())
+                        .inner_size(760.0, 520.0)
+                };
+                let mut builder = base();
+                // Image::from_path reads png/ico only, so a user-picked jpg or
+                // gif just leaves the launcher icon in place.
+                if let Some(ref p) = console_icon {
+                    match tauri::image::Image::from_path(p) {
+                        Ok(img) => match builder.icon(img) {
+                            Ok(b) => builder = b,
+                            Err(e) => {
+                                warn!("could not apply console window icon: {}", e);
+                                builder = base();
+                            }
+                        },
+                        Err(e) => warn!("could not read console icon {:?}: {}", p, e),
+                    }
+                }
+                if let Err(e) = builder.build() {
+                    warn!("failed to create console window: {}", e);
+                }
             }
         })
         .map_err(|e| e.to_string())?;
@@ -178,6 +203,97 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
 
     let _ = cs.update_last_connected(&id);
     Ok(serde_json::json!({ "code": 0 }).to_string())
+}
+
+/// Bundled preset icons, in display order. A connection stores
+/// `preset:<name>`; the files live in resources/icons/. Phosphor Icons glyphs
+/// (MIT, see resources/icons/LICENSE-phosphor.txt).
+const PRESET_ICONS: [&str; 12] = [
+    "heartbeat", "stethoscope", "shield-check", "database", "plug", "cloud",
+    "globe", "gear", "rocket", "flask", "bug", "lightning",
+];
+
+/// Resolve a `preset:<name>` icon to its bundled file. None for unknown or
+/// unsafe names (the name is data from launcher-data.json, so it is not
+/// trusted to form paths).
+fn resolve_preset_icon(app: &AppHandle, name: &str) -> Option<PathBuf> {
+    use tauri::path::BaseDirectory;
+    if !PRESET_ICONS.contains(&name) {
+        return None;
+    }
+    app.path()
+        .resolve(format!("resources/icons/{}.png", name), BaseDirectory::Resource)
+        .ok()
+        .filter(|p| p.is_file())
+}
+
+/// Resolve a connection's icon selection to a file: `preset:<name>` to the
+/// bundled preset, anything else as a file path, and the bundled default when
+/// nothing is selected or the selection is unavailable. The single resolution
+/// path used by the connection list, the picker preview, and the console
+/// window, so they can never disagree. None only if even the default is gone.
+fn resolve_connection_icon(app: &AppHandle, icon_path: Option<&str>) -> Option<PathBuf> {
+    use tauri::path::BaseDirectory;
+    if let Some(sel) = icon_path.map(str::trim).filter(|s| !s.is_empty()) {
+        let resolved = match sel.strip_prefix("preset:") {
+            Some(name) => resolve_preset_icon(app, name),
+            None => Some(PathBuf::from(sel)).filter(|p| p.is_file()),
+        };
+        match resolved {
+            Some(p) => return Some(p),
+            None => warn!("connection icon {:?} unavailable; using the default icon", sel),
+        }
+    }
+    app.path()
+        .resolve("resources/admin-icon.png", BaseDirectory::Resource)
+        .ok()
+        .filter(|p| p.is_file())
+}
+
+/// Data URI of a connection's icon. Backs the connection list and the picker.
+#[tauri::command(rename_all = "snake_case")]
+fn get_connection_icon(icon_path: Option<String>, app: AppHandle) -> Result<String, String> {
+    use base64::Engine;
+    let p = resolve_connection_icon(&app, icon_path.as_deref()).ok_or("no icon available")?;
+    let mime = match p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        _ => "image/png",
+    };
+    let bytes = fs::read(&p).map_err(|e| e.to_string())?;
+    Ok(format!("data:{};base64,{}", mime, base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// Persist an icon composed in the picker (a canvas PNG) for a connection,
+/// into <data dir>/icons/<id>.png. Returns the path to store in iconPath.
+#[tauri::command(rename_all = "snake_case")]
+fn save_connection_icon(connection_id: String, png_base64: String, cs: State<ConnectionStore>) -> Result<String, String> {
+    use base64::Engine;
+    let sanitized: String = connection_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        return Err("bad connection id".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(png_base64.trim())
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 5 * 1024 * 1024 {
+        return Err("icon too large".to_string());
+    }
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Err("not a png".to_string());
+    }
+    let dir = cs
+        .cache_dir
+        .parent()
+        .ok_or("no data directory")?
+        .join("icons");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.png", sanitized));
+    fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -275,14 +391,12 @@ fn main() {
         exit(1);
     }
 
-    let webcache = WebstartCache::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init())
         .manage(connection_store.expect("ConnectionStore init was checked above"))
-        .manage(webcache)
         .manage(ConsoleRegistry::default())
         .invoke_handler(tauri::generate_handler![
             launch,
@@ -296,6 +410,8 @@ fn main() {
             load_single_connection,
             get_launcher_info,
             set_pin,
+            get_connection_icon,
+            save_connection_icon,
             console::console_subscribe,
             console::console_save
         ])
