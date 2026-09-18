@@ -1,6 +1,6 @@
 [package]
 name = "launcher"
-version = "2.3.0"
+version = "2.3.1"
 description = "An Open Integration Engine Admin Client Launcher"
 authors = ["kiran@sereen.io"]
 homepage = "https://sereen.io"
@@ -17,7 +17,7 @@ tauri-build = { version = "2.6", features = [] }
 # image-png: Image::from_path, used to give each console window its
 # connection's icon (a launcher-owned window, so it would otherwise show the
 # launcher icon).
-tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
+tauri = { version = "2.11", features = ["image-png"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 # the above are added and required by Tauri
