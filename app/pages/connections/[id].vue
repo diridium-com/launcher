@@ -45,7 +45,7 @@ const fieldHelp: { name: string; text: string }[] = [
   { name: "JVM Arguments", text: "Extra flags for the administrator's JVM." },
   {
     name: "Heap Size",
-    text: "Maximum heap for the administrator. Blank uses the value from the server's JNLP.",
+    text: "Maximum heap for the administrator. Raise it if the administrator runs out of memory.",
   },
   { name: "Icon", text: "The icon shown for this connection and for its console window." },
   {
