@@ -279,14 +279,11 @@ impl WebstartFile {
         cmd.arg("-cp")
             .arg(classpath)
             .arg(&self.main_class)
-            .args(&self.args);
-
-        if let Some(ref username) = ce.username {
-            cmd.arg(username);
-            if let Some(ref password) = ce.password {
-                cmd.arg(password);
-            }
-        }
+            .args(build_client_args(
+                &self.args,
+                ce.username.as_deref(),
+                ce.password.as_deref(),
+            ));
 
         if let Some(console) = console {
             // Capture BOTH stdout and stderr. Swing/AWT exceptions from the
@@ -756,6 +753,36 @@ fn is_safe_basename(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 
+/// The administrator's own argument list: every JNLP `<argument>` in document
+/// order, then the optional username and password.
+///
+/// Forwarding the JNLP arguments untouched is the launcher's entire role in
+/// client-side certificate pinning. The server puts `-trust <thumbprint>` in
+/// the JNLP and we pass the baton rather than reinterpreting it
+/// (OpenIntegrationEngine/engine#280, launcher #18). The client's parser
+/// consumes flags wherever they appear and advances its positional index only
+/// on non-flag tokens, so username and password bind to positions 2 and 3 only
+/// as long as they stay last and JNLP order is preserved. Reordering here, or
+/// inserting an argument of our own, breaks client pinning silently: the launch
+/// still succeeds and the trust value lands in the wrong slot.
+///
+/// A password without a username is dropped, since it would otherwise bind to
+/// the username position.
+fn build_client_args(
+    jnlp_args: &[String],
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = jnlp_args.to_vec();
+    if let Some(username) = username {
+        args.push(username.to_string());
+        if let Some(password) = password {
+            args.push(password.to_string());
+        }
+    }
+    args
+}
+
 fn get_client_args(root: &Node) -> Vec<String> {
     root.descendants()
         .filter(|n| n.has_tag_name("argument"))
@@ -855,7 +882,8 @@ fn classify_cached_jar(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_cached_jar, collect_jar_tasks, get_dir_from_path, get_file_name_from_path,
+        build_client_args, classify_cached_jar, collect_jar_tasks, get_dir_from_path,
+        get_file_name_from_path,
         get_node, is_safe_basename, normalize_url, sanitize_for_path, sha256_of_file,
         split_jnlp_url, Channel, WebstartFile,
     };
@@ -1195,6 +1223,43 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&cache_root).ok();
+    }
+
+    /// Client-side cert pinning depends on this argv contract and nothing in the
+    /// launcher would fail if it broke: the administrator still starts, it just
+    /// parses `-trust` into the wrong slot. The realistic shape below comes from
+    /// OpenIntegrationEngine/engine#280 via launcher #18.
+    #[test]
+    fn build_client_args_forwards_jnlp_order_then_appends_credentials() {
+        let jnlp: Vec<String> = ["server", "version", "-ssl", "p", "c", "-trust", "THUMB"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let args = build_client_args(&jnlp, Some("admin"), Some("secret"));
+        assert_eq!(
+            vec!["server", "version", "-ssl", "p", "c", "-trust", "THUMB", "admin", "secret"],
+            args,
+            "JNLP arguments must keep document order, credentials go last"
+        );
+
+        // Deliberately NOT asserted here: how the client parses that argv. The
+        // flags' arities are the client's business, and #18's whole point is
+        // that the launcher passes the baton rather than reinterpreting it.
+        // Modelling the parser here would pin our guess about it, and would
+        // break this test whenever the client changed for reasons that have
+        // nothing to do with the launcher.
+
+        // No credentials configured: the JNLP arguments are forwarded alone.
+        assert_eq!(jnlp, build_client_args(&jnlp, None, None));
+
+        // A password with no username would bind to the username position.
+        assert_eq!(jnlp, build_client_args(&jnlp, None, Some("secret")));
+
+        // Username alone is valid; the administrator prompts for the password.
+        let mut expected = jnlp.clone();
+        expected.push("admin".to_string());
+        assert_eq!(expected, build_client_args(&jnlp, Some("admin"), None));
     }
 
     #[test]
