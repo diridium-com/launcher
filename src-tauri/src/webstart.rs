@@ -102,8 +102,9 @@ struct J2se {
 
 impl WebstartFile {
     pub fn load(config: LoadConfig) -> Result<WebstartFile, Error> {
-        let base_url = normalize_url(config.base_url)?;
-        let webstart = format!("{}/webstart.jnlp", base_url);
+        // The address may be the JNLP itself, in which case base_url becomes the
+        // directory it lives in. See split_jnlp_url.
+        let (webstart, base_url) = split_jnlp_url(config.base_url)?;
         // The connection id can come from an imported file, so sanitize it before
         // it ever touches the filesystem (cache dirs, log path). main.rs already
         // sanitizes the same id for window labels.
@@ -651,7 +652,16 @@ fn collect_jar_tasks(
 
             let doc = roxmltree::Document::parse(&data)?;
             let root = doc.root();
-            let ext_base_url = format!("{}/webstart/extensions", base_url);
+            // Resolve the extension's own jars against the directory it was
+            // actually fetched from. Hardcoding "webstart/extensions" happened to
+            // match every standard engine, so it never fired, but it silently
+            // pointed elsewhere the moment a server nested extensions deeper.
+            let ext_dir_href = get_dir_from_path(href);
+            let ext_base_url = if ext_dir_href.is_empty() {
+                base_url.to_string()
+            } else {
+                format!("{}/{}", base_url, ext_dir_href)
+            };
             if let Some(resources_node) = get_node(&root, "resources") {
                 collect_jar_tasks(ctx, &resources_node, &ext_dir, &ext_base_url, tasks, false)?;
             }
@@ -688,6 +698,56 @@ fn get_file_name_from_path(p: &str) -> &str {
     // Split on both separators: a server-supplied href could use '\' to escape
     // the cache directory on Windows.
     p.rsplit(['/', '\\']).next().unwrap_or(p)
+}
+
+/// The directory part of an href, or "" when it names a file with no directory.
+/// Splits on both separators for the same reason `get_file_name_from_path` does.
+fn get_dir_from_path(p: &str) -> &str {
+    match p.rfind(['/', '\\']) {
+        Some(i) => &p[..i],
+        None => "",
+    }
+}
+
+/// Split a connection address into the JNLP URL to fetch and the base URL that
+/// relative hrefs inside it resolve against.
+///
+/// The engine's own landing page tells operators to point their launcher at
+/// `https://host:port/webstart.jnlp`, so an address ending in a `.jnlp` file is
+/// the JNLP itself and must be used as given rather than treated as a base to
+/// append to. Appending produced `.../webstart.jnlp/webstart.jnlp`, which the
+/// server answered with a component descriptor, so the launch died on the
+/// confusing "not an application-desc node" error (#21).
+///
+/// Honouring it means the base for hrefs becomes the directory the JNLP was
+/// found in, not the address: jars and extensions are relative to the file's
+/// location. Anything not ending in `.jnlp` is a base and gets the default file
+/// name appended, so a context path like `/mirth` keeps working unchanged.
+///
+/// Using the address as given also means a server that serves its JNLP from a
+/// non-default path is supported, which is why this honours the address instead
+/// of stripping the file name off and re-appending the default.
+fn split_jnlp_url(address: &str) -> Result<(String, String), Error> {
+    let normalized = normalize_url(address)?;
+    // Detect on the parsed path, not the whole string: a host that happens to
+    // end in ".jnlp" has no path and must not be mistaken for a file name.
+    let parsed = Url::parse(&normalized)?;
+    let last_segment = parsed.path().rsplit('/').next().unwrap_or("");
+    let is_jnlp_file = last_segment.len() > 5
+        && last_segment[last_segment.len() - 5..].eq_ignore_ascii_case(".jnlp");
+
+    if is_jnlp_file {
+        // normalize_url leaves no trailing slash, so cutting at the last '/'
+        // yields the directory holding the JNLP. The detection above guarantees
+        // there is a path segment, so this '/' is always past the authority.
+        let cut = normalized
+            .rfind('/')
+            .ok_or_else(|| Error::msg("internal error: jnlp address has no path separator"))?;
+        let base = normalized[..cut].to_string();
+        Ok((normalized, base))
+    } else {
+        Ok((format!("{}/webstart.jnlp", normalized), normalized))
+    }
 }
 
 /// A basename is safe to join under the cache only if it has no path separators
@@ -795,9 +855,9 @@ fn classify_cached_jar(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_cached_jar, collect_jar_tasks, get_file_name_from_path, get_node,
-        is_safe_basename, normalize_url, sanitize_for_path, sha256_of_file, Channel,
-        WebstartFile,
+        classify_cached_jar, collect_jar_tasks, get_dir_from_path, get_file_name_from_path,
+        get_node, is_safe_basename, normalize_url, sanitize_for_path, sha256_of_file,
+        split_jnlp_url, Channel, WebstartFile,
     };
     use anyhow::Error;
     use std::path::PathBuf;
@@ -1021,5 +1081,131 @@ mod tests {
             assert_eq!(expected, &reconstructed_url);
         }
         Ok(())
+    }
+
+    /// The engine's landing page hands operators a URL ending in webstart.jnlp,
+    /// so that form must be used as given rather than appended to (#21). A base
+    /// address, with or without a context path, must keep behaving as before.
+    ///
+    /// This pins the function, NOT the call site: reverting load() to append
+    /// unconditionally leaves this test green. What stops that regression is
+    /// structural rather than a test, so keep it that way: the only
+    /// "{}/webstart.jnlp" append in this file lives inside split_jnlp_url, so
+    /// there is no second path to the JNLP url to drift out of step.
+    #[test]
+    fn split_jnlp_url_honours_an_address_that_is_already_a_jnlp() -> Result<(), Error> {
+        let candidates = [
+            // (address, expected jnlp url, expected href base)
+            ("https://h:8443", "https://h:8443/webstart.jnlp", "https://h:8443"),
+            ("https://h:8443/", "https://h:8443/webstart.jnlp", "https://h:8443"),
+            (
+                "https://h:8443/webstart.jnlp",
+                "https://h:8443/webstart.jnlp",
+                "https://h:8443",
+            ),
+            // Trailing slash after the file name still names the file.
+            (
+                "https://h:8443/webstart.jnlp/",
+                "https://h:8443/webstart.jnlp",
+                "https://h:8443",
+            ),
+            // Case is not meaningful in the extension.
+            (
+                "https://h:8443/WEBSTART.JNLP",
+                "https://h:8443/WEBSTART.JNLP",
+                "https://h:8443",
+            ),
+            // A context path is a base, not a file.
+            (
+                "https://h:8443/mirth",
+                "https://h:8443/mirth/webstart.jnlp",
+                "https://h:8443/mirth",
+            ),
+            // A non-default JNLP path is honoured, and its directory is the base.
+            (
+                "https://h:8443/foo/custom.jnlp",
+                "https://h:8443/foo/custom.jnlp",
+                "https://h:8443/foo",
+            ),
+            // A host ending in .jnlp has no path and must not look like a file.
+            (
+                "https://webstart.jnlp",
+                "https://webstart.jnlp/webstart.jnlp",
+                "https://webstart.jnlp",
+            ),
+        ];
+
+        for (address, expected_jnlp, expected_base) in candidates {
+            let (jnlp, base) = split_jnlp_url(address)?;
+            assert_eq!(expected_jnlp, &jnlp, "jnlp url for {}", address);
+            assert_eq!(expected_base, &base, "href base for {}", address);
+        }
+        Ok(())
+    }
+
+    /// An extension's jars resolve against the directory the extension JNLP was
+    /// fetched from. This nests one level deeper than the standard layout, which
+    /// is the only arrangement that tells the two apart: the old hardcoded
+    /// "webstart/extensions" matched the standard layout exactly, so nothing
+    /// caught it.
+    #[test]
+    fn extension_jars_resolve_against_the_extension_href_directory() {
+        const EXT_JNLP: &str = concat!(
+            "<?xml version=\"1.0\"?>\n",
+            "<jnlp><resources>\n",
+            "  <jar href=\"libs/foo/foo-client-1.0.0.jar\" sha256=\"ZXh0\"/>\n",
+            "</resources></jnlp>"
+        );
+        const CORE_JNLP: &str = concat!(
+            "<?xml version=\"1.0\"?>\n",
+            "<jnlp><resources>\n",
+            "  <extension href=\"webstart/extensions/vendor/foo.jnlp\"/>\n",
+            "</resources></jnlp>"
+        );
+
+        let (base_url, server) = serve_once(EXT_JNLP);
+        let doc = roxmltree::Document::parse(CORE_JNLP).expect("parse core jnlp");
+        let root = doc.root();
+        let resources = get_node(&root, "resources").expect("resources node");
+
+        let cache_root = std::env::temp_dir().join(format!("launcher-extbase-{}", std::process::id()));
+        let core_dir = cache_root.join("core");
+        std::fs::create_dir_all(&core_dir).expect("create core dir");
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("build test client");
+        let on_progress: Channel<serde_json::Value> = Channel::new(|_| Ok(()));
+        let mut tasks = Vec::new();
+        let ctx = super::JarCollectCtx {
+            client: &client,
+            cache_root: &cache_root,
+            on_progress: &on_progress,
+        };
+        collect_jar_tasks(&ctx, &resources, &core_dir, &base_url, &mut tasks, true)
+            .expect("collect_jar_tasks");
+        server.join().ok();
+
+        assert_eq!(tasks.len(), 1, "the extension contributes its one jar");
+        assert_eq!(
+            format!("{}/webstart/extensions/vendor/libs/foo/foo-client-1.0.0.jar", base_url),
+            tasks[0].url,
+            "extension jar must resolve under the extension's own directory"
+        );
+
+        std::fs::remove_dir_all(&cache_root).ok();
+    }
+
+    #[test]
+    fn get_dir_from_path_returns_the_directory_or_empty() {
+        assert_eq!("webstart/extensions", get_dir_from_path("webstart/extensions/foo.jnlp"));
+        assert_eq!(
+            "webstart/extensions/vendor",
+            get_dir_from_path("webstart/extensions/vendor/foo.jnlp")
+        );
+        assert_eq!("", get_dir_from_path("foo.jnlp"));
+        // Both separators, matching get_file_name_from_path.
+        assert_eq!("a\\b", get_dir_from_path("a\\b\\foo.jnlp"));
     }
 }
