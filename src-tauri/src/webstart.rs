@@ -264,6 +264,22 @@ impl WebstartFile {
             }
         }
 
+        // The JNLP also declares a heap, as max-heap-size on <j2se>, fed by
+        // administrator.maxheapsize in mirth.properties (verified against OIE
+        // 4.6.0: administrator.maxheapsize = 512m produced max-heap-size="512m").
+        // We ignore it deliberately, and get_j2ses does not even parse it.
+        //
+        // The real workflow is that the administrator runs out of memory and the
+        // operator raises the heap in their launcher and relaunches; almost
+        // nobody edits the server's value. So this field has to win, and it has
+        // to arrive pre-filled (connection.rs defaults it to 512m) rather than
+        // blank, or the person chasing an OOM has nothing to edit.
+        //
+        // Known consequence, accepted: an operator who DOES raise
+        // administrator.maxheapsize server-side is silently overridden by this
+        // value, with nothing reporting the conflict. Deferring to the JNLP when
+        // blank would fix that and break the common path, which is the worse
+        // trade.
         let heap = ce.heap_size.trim();
         if !heap.is_empty() {
             cmd.arg(format!("-Xmx{}", heap));
@@ -790,6 +806,9 @@ fn get_client_args(root: &Node) -> Vec<String> {
         .collect()
 }
 
+/// Only `java-vm-args` and `version` are read. `max-heap-size` is present on
+/// these nodes and is skipped on purpose; see the note at the `-Xmx` site in
+/// `run()` for why the connection's own Heap Size has to win.
 fn get_j2ses(resources: &Node) -> Option<Vec<J2se>> {
     let j2ses: Vec<J2se> = resources
         .descendants()
