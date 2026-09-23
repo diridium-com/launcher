@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -120,6 +120,14 @@ impl Default for ConnectionEntry {
 }
 
 impl ConnectionStore {
+    /// The file connections are persisted to. Surfaced in the UI next to the
+    /// password field: the operator is told the password is stored unencrypted,
+    /// and that is only actionable if they can find the file. Read from the
+    /// store's own field rather than recomputed so the two cannot drift.
+    pub fn store_path(&self) -> &Path {
+        &self.con_location
+    }
+
     pub fn init(data_dir_path: PathBuf) -> Result<Self, Error> {
         let con_location = data_dir_path.join("launcher-data.json");
 
