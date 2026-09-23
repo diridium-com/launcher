@@ -9,8 +9,9 @@ npm install          # frontend dependencies
 npm run tauri build  # full build (frontend + Rust + .app/.dmg bundle)
 ```
 
-Rust-only check/test (from repo root):
+Rust-only check/test (run from `src-tauri/`; there is no root `Cargo.toml`):
 ```bash
+cd src-tauri
 cargo check
 cargo test
 ```
