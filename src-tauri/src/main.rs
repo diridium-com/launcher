@@ -41,7 +41,7 @@ async fn get_launcher_info(cs: State<'_, ConnectionStore>) -> Result<String, Str
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
+async fn launch(id: String, force: bool, ack_port_mismatch: bool, on_progress: Channel<serde_json::Value>, app: AppHandle, cs: State<'_, ConnectionStore>, registry: State<'_, ConsoleRegistry>) -> Result<String, String> {
     let ce = cs.get(&id)
         .ok_or_else(|| format!("connection not found: {}", id))?;
 
@@ -62,6 +62,7 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
     let conn_id = ce.id.clone();
     let conn_name = ce.name.clone();
     let donotcache = ce.donotcache;
+    let suppress_port_mismatch = ce.suppress_port_mismatch;
     let engine_type = ce.engine_type.clone();
 
     // Verify the server's TLS certificate against the connection's pin (TOFU).
@@ -116,6 +117,9 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
             on_progress: &on_progress,
             pinned_cert_sha256,
             acknowledge_cache_mismatch: force,
+            // The stored suppression counts as a standing acknowledgement, so a
+            // connection the operator has silenced never re-prompts.
+            acknowledge_port_mismatch: ack_port_mismatch || suppress_port_mismatch,
         })
     }).await.map_err(|e| e.to_string())?;
 
@@ -124,6 +128,14 @@ async fn launch(id: String, force: bool, on_progress: Channel<serde_json::Value>
             // A cache/engine collision is a distinct, recoverable outcome:
             // surface it as code 4 with details so the frontend can confirm
             // and retry with force=true, instead of a generic error.
+            if let Some(pm) = e.downcast_ref::<crate::webstart::PortMismatch>() {
+                return Ok(serde_json::json!({
+                    "code": 5,
+                    "configured_port": pm.configured_port,
+                    "advertised_port": pm.advertised_port,
+                    "advertised_url": pm.advertised_url,
+                }).to_string());
+            }
             if let Some(cm) = e.downcast_ref::<crate::webstart::CacheMismatch>() {
                 return Ok(serde_json::json!({
                     "code": 4,
@@ -313,6 +325,15 @@ fn set_pin(connection_id: String, sha256: String, cs: State<ConnectionStore>) ->
     cs.update_pin(&connection_id, Some(pin)).map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+fn set_suppress_port_mismatch(
+    connection_id: String,
+    suppress: bool,
+    cs: State<ConnectionStore>,
+) -> Result<(), String> {
+    cs.set_suppress_port_mismatch(&connection_id, suppress).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_default_connectionentry(_cs: State<ConnectionStore>) -> Result<serde_json::Value, String> {
     let connection_entry = ConnectionEntry::default();
@@ -416,6 +437,7 @@ fn main() {
             load_single_connection,
             get_launcher_info,
             set_pin,
+            set_suppress_port_mismatch,
             get_connection_icon,
             save_connection_icon,
             console::console_subscribe,

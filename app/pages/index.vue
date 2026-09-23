@@ -111,7 +111,8 @@ const handleLaunchClick = (connection: Connection) => {
   nextTick(() => launchServer(connection))
 }
 
-const { trustCertificate, confirmCertChange, confirmCacheMismatch } = useConfirmRejectModal()
+const { trustCertificate, confirmCertChange, confirmCacheMismatch, confirmPortMismatch } =
+  useConfirmRejectModal()
 
 const launchServer = async (connection: Connection) => {
   const onProgress = new Channel<{ message: string }>()
@@ -122,17 +123,24 @@ const launchServer = async (connection: Connection) => {
   try {
     // Loop so a certificate trust prompt can be shown, then the launch retried.
     // code 0 = launched, 2 = first-use trust, 3 = cert changed, 4 = cache
-    // mismatch, else = error.
+    // mismatch, 5 = advertised port differs from the configured one, else =
+    // error.
     // Bounded so a cert that changes every handshake can't re-prompt forever.
     let attempts = 0
     let force = false
+    let ackPortMismatch = false
     while (true) {
       if (attempts++ > 4) {
         launchError.value = "Launch aborted: the server certificate keeps changing."
         return
       }
       const resp = JSON.parse(
-        await invoke<string>("launch", { id: connection.id, force, on_progress: onProgress }),
+        await invoke<string>("launch", {
+          id: connection.id,
+          force,
+          ack_port_mismatch: ackPortMismatch,
+          on_progress: onProgress,
+        }),
       )
       if (resp.code === 0) return
       if (resp.code === 2 || resp.code === 3) {
@@ -148,6 +156,29 @@ const launchServer = async (connection: Connection) => {
         }
         await invoke("set_pin", { connection_id: connection.id, sha256: cert.sha256 })
         connection.pinnedCertSha256 = cert.sha256
+        progressMessage.value = "Connecting..."
+        continue
+      }
+      if (resp.code === 5) {
+        progressMessage.value = "Awaiting port confirmation..."
+        const { confirmed, payload: suppress } = await confirmPortMismatch({
+          configuredPort: resp.configured_port,
+          advertisedPort: resp.advertised_port,
+          advertisedUrl: resp.advertised_url,
+        })
+        if (!confirmed) {
+          launchError.value = "Launch cancelled: the server advertises a different port."
+          return
+        }
+        if (suppress) {
+          await invoke("set_suppress_port_mismatch", {
+            connection_id: connection.id,
+            suppress: true,
+          })
+        }
+        // Acknowledged for this run even when not suppressed, so the next
+        // attempt in this loop does not prompt again.
+        ackPortMismatch = true
         progressMessage.value = "Connecting..."
         continue
       }
