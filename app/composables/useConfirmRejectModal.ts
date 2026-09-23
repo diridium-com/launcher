@@ -4,6 +4,7 @@
 import { createVNode, render, type Component } from "vue"
 import TrustCertModal from "~/components/TrustCertModal.vue"
 import CacheMismatchModal from "~/components/CacheMismatchModal.vue"
+import PortMismatchModal from "~/components/PortMismatchModal.vue"
 import type { CertInfo } from "~/types"
 
 export function useConfirmRejectModal() {
@@ -49,5 +50,44 @@ export function useConfirmRejectModal() {
   const confirmCacheMismatch = (info: { engineType: string; version: string; jars: string[] }) =>
     mountModal(CacheMismatchModal, info)
 
-  return { trustCertificate, confirmCertChange, confirmCacheMismatch }
+  // Same as mountModal, but confirm carries a payload. The port-mismatch prompt
+  // has to report its "don't show again" checkbox as well as the choice, and a
+  // bare boolean cannot.
+  function mountModalWithPayload<T>(
+    component: Component,
+    props: Record<string, unknown>,
+  ): Promise<{ confirmed: boolean; payload?: T }> {
+    return new Promise((resolve) => {
+      const container = document.createElement("div")
+      document.body.appendChild(container)
+      const cleanup = () => {
+        render(null, container)
+        container.remove()
+      }
+      const vnode = createVNode(component, {
+        ...props,
+        onConfirm: (payload: T) => {
+          resolve({ confirmed: true, payload })
+          cleanup()
+        },
+        onCancel: () => {
+          resolve({ confirmed: false })
+          cleanup()
+        },
+      })
+      vnode.appContext = appContext
+      render(vnode, container)
+    })
+  }
+
+  // The server advertises a port the connection is not configured for, so the
+  // administrator will try to log in somewhere else. Resolves the choice plus
+  // whether to stop asking for this connection.
+  const confirmPortMismatch = (info: {
+    configuredPort: number
+    advertisedPort: number
+    advertisedUrl: string
+  }) => mountModalWithPayload<boolean>(PortMismatchModal, info)
+
+  return { trustCertificate, confirmCertChange, confirmCacheMismatch, confirmPortMismatch }
 }

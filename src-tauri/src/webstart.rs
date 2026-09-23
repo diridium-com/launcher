@@ -39,6 +39,12 @@ pub struct LoadConfig<'a> {
     /// The connection's trusted leaf-cert SHA-256 (hex). Required here: the
     /// launch command verifies/captures the pin before calling load().
     pub pinned_cert_sha256: Option<String>,
+    /// When false, a JNLP advertising a different port than the connection is
+    /// configured for aborts with [`PortMismatch`] so the operator can confirm.
+    /// Separate from `acknowledge_cache_mismatch` on purpose: acknowledging a
+    /// port warning must not silently approve overwriting a jar cache the
+    /// operator was never shown.
+    pub acknowledge_port_mismatch: bool,
     /// When false, a cache dir that already holds *core* jars whose contents
     /// differ from what this server's JNLP declares (a foreign-engine collision
     /// under the same engine-type + version) aborts with [`CacheMismatch`] so
@@ -58,6 +64,84 @@ pub struct LoadConfig<'a> {
 /// changed extension jar is an upgrade, not a collision. Carried up as an
 /// `anyhow::Error` and downcast by the launch command into a distinct frontend
 /// code.
+/// The JNLP advertises a different port than the operator configured, so the
+/// administrator will try to log in somewhere the operator did not point it.
+///
+/// Measured on OIE 4.6.0: reached over a Docker mapping of host 8444 to
+/// container 8443, with `server.url` unset, the JNLP's first `<argument>` read
+/// `https://localhost:8443` while the engine was only reachable on 8444. The
+/// launch succeeds and the administrator then cannot reach the server, which is
+/// indistinguishable from the launcher having mangled the address.
+///
+/// Ports only. Hostnames legitimately differ through an SSH tunnel or any port
+/// forward, where the operator reaches `localhost` and the server knows itself
+/// by another name, so comparing hosts would fire constantly on setups that
+/// work. Carried as an `anyhow::Error` and downcast by the launch command into
+/// a distinct frontend code, like [`CacheMismatch`].
+#[derive(Debug)]
+pub struct PortMismatch {
+    pub configured_port: u16,
+    pub advertised_port: u16,
+    pub advertised_url: String,
+}
+
+impl std::fmt::Display for PortMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server advertises port {} but the connection is configured for port {}",
+            self.advertised_port, self.configured_port
+        )
+    }
+}
+
+impl std::error::Error for PortMismatch {}
+
+/// The port a URL actually uses, filling in the scheme's default when none is
+/// written. Without this `https://host` and `https://host:8443` compare equal
+/// on `port()`, both being None and Some(8443), and the check silently passes.
+fn effective_port(url: &str) -> Option<u16> {
+    Url::parse(url).ok().and_then(|u| u.port_or_known_default())
+}
+
+/// Whether the server advertises a port the operator did not configure.
+///
+/// Extracted so tests exercise this decision rather than a lookalike composed
+/// in the test file: a test that reassembles the logic passes happily while the
+/// real call site drifts.
+///
+/// Returns None, meaning no warning, whenever either side lacks a parseable
+/// port or no argument is URL-shaped. A different engine whose JNLP has another
+/// shape should produce silence, not a wrong warning.
+fn detect_port_mismatch(base_url: &str, args: &[String]) -> Option<PortMismatch> {
+    let configured_port = effective_port(base_url)?;
+    let advertised = advertised_server_url(args)?;
+    let advertised_port = effective_port(advertised)?;
+    if advertised_port == configured_port {
+        return None;
+    }
+    Some(PortMismatch {
+        configured_port,
+        advertised_port,
+        advertised_url: advertised.clone(),
+    })
+}
+
+/// The first argument that parses as an http(s) URL, which for the Mirth/OIE
+/// administrator is the server address (verified against OIE 4.6.0, whose
+/// application-desc carries exactly the server URL then the version).
+///
+/// Scanning for a URL rather than taking args[0] means a different engine, or a
+/// future one that leads with a flag, produces no warning instead of a wrong
+/// one.
+fn advertised_server_url(args: &[String]) -> Option<&String> {
+    args.iter().find(|a| {
+        Url::parse(a)
+            .map(|u| matches!(u.scheme(), "http" | "https"))
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Debug)]
 pub struct CacheMismatch {
     pub engine_type: String,
@@ -131,6 +215,16 @@ impl WebstartFile {
             .ok_or(Error::msg("missing main-class attribute"))?
             .to_string();
         let args = get_client_args(&main_class_node);
+
+        // Before any download: the operator gets told in a second rather than
+        // after fetching ~90MB of jars. Skipped silently when either side has no
+        // parseable port or no argument is URL-shaped, so an engine whose JNLP
+        // differs in shape produces no warning rather than a wrong one.
+        if !config.acknowledge_port_mismatch {
+            if let Some(mismatch) = detect_port_mismatch(&base_url, &args) {
+                return Err(Error::new(mismatch));
+            }
+        }
 
         let resources_node = get_node(&root, "resources");
 
@@ -634,6 +728,24 @@ fn collect_jar_tasks(
             Some(h) => h,
             None => continue,
         };
+        // Built from the operator's address, deliberately ignoring the JNLP's
+        // own `codebase` attribute, which the spec says relative hrefs resolve
+        // against and which this file never reads.
+        //
+        // The operator's address is PROVEN reachable: the JNLP was just fetched
+        // over it. `codebase` is only the server's claim about itself, and that
+        // claim is not reliable. Measured on OIE 4.6.0 with server.url unset:
+        // the <argument> advertised https://localhost:8443 while the engine was
+        // only reachable on 8444, so a launcher trusting the server's self-
+        // report would have sent the administrator somewhere it could not go.
+        //
+        // In practice this changes nothing, because `codebase` is request-
+        // derived: reached over 8444 the same JNLP returned
+        // codebase="https://localhost:8444", identical to the typed address.
+        // The two diverge only when jar assets are served from a different
+        // origin than the API (a CDN or similar), which nobody has reported.
+        // If that deployment ever turns up it needs its own issue, not a
+        // silent switch to an unproven base.
         let url = format!("{}/{}", base_url, href);
 
         if jar {
@@ -901,8 +1013,8 @@ fn classify_cached_jar(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_client_args, classify_cached_jar, collect_jar_tasks, get_dir_from_path,
-        get_file_name_from_path,
+        advertised_server_url, build_client_args, classify_cached_jar, collect_jar_tasks,
+        detect_port_mismatch, effective_port, get_dir_from_path, get_file_name_from_path,
         get_node, is_safe_basename, normalize_url, sanitize_for_path, sha256_of_file,
         split_jnlp_url, Channel, WebstartFile,
     };
@@ -1279,6 +1391,77 @@ mod tests {
         let mut expected = jnlp.clone();
         expected.push("admin".to_string());
         assert_eq!(expected, build_client_args(&jnlp, Some("admin"), None));
+    }
+
+    /// The check exists because a server can advertise a port it is not
+    /// reachable on (measured on OIE 4.6.0 behind a Docker port mapping). These
+    /// pin the two ways it could silently pass: an implicit default port, and an
+    /// argument list with nothing URL-shaped in it.
+    #[test]
+    fn effective_port_fills_in_the_scheme_default() {
+        assert_eq!(Some(8443), effective_port("https://host:8443"));
+        assert_eq!(Some(8444), effective_port("https://host:8444"));
+        // The trap: without a default, https://host and https://host:443 would
+        // not compare equal, and https://host vs https://host:8443 would both
+        // look portless and pass.
+        assert_eq!(Some(443), effective_port("https://host"));
+        assert_eq!(Some(80), effective_port("http://host"));
+        assert_eq!(Some(443), effective_port("https://host/webstart.jnlp"));
+        assert_eq!(None, effective_port("not a url"));
+    }
+
+    #[test]
+    fn advertised_server_url_finds_the_first_url_shaped_argument() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+
+        // OIE 4.6.0's actual shape: server URL then version.
+        let real = s(&["https://localhost:8443", "4.6.0"]);
+        assert_eq!(Some(&"https://localhost:8443".to_string()), advertised_server_url(&real));
+
+        // A leading flag must not shift the answer onto a non-URL.
+        let flagged = s(&["-trust", "THUMB", "https://localhost:8443", "4.6.0"]);
+        assert_eq!(Some(&"https://localhost:8443".to_string()), advertised_server_url(&flagged));
+
+        // Nothing URL-shaped: no warning rather than a wrong one.
+        assert_eq!(None, advertised_server_url(&s(&["4.6.0", "-ssl"])));
+        assert_eq!(None, advertised_server_url(&[]));
+
+        // A non-http scheme is not a server address.
+        assert_eq!(None, advertised_server_url(&s(&["file:///tmp/x", "4.6.0"])));
+    }
+
+    /// The decision, on the exact values a live engine produced. Captured from
+    /// OIE 4.6.0 in Docker with host 8444 mapped to container 8443 and
+    /// server.url unset: the JNLP fetched over 8444 advertised
+    /// https://localhost:8443. This is the case the warning exists for, so if a
+    /// refactor ever stops it firing here, the feature is gone.
+    #[test]
+    fn a_live_engine_behind_a_port_mapping_is_detected() {
+        let args = vec!["https://localhost:8443".to_string(), "4.6.0".to_string()];
+        let configured = "https://localhost:8444";
+
+        let m = detect_port_mismatch(configured, &args).expect("must be detected");
+        assert_eq!(8444, m.configured_port);
+        assert_eq!(8443, m.advertised_port);
+        assert_eq!("https://localhost:8443", m.advertised_url);
+
+        // With server.url set to the reachable address, the same engine
+        // advertised 8444 and the warning must stay silent.
+        let fixed = vec!["https://localhost:8444".to_string(), "4.6.0".to_string()];
+        assert!(detect_port_mismatch(configured, &fixed).is_none());
+
+        // Reached by a different name through a tunnel, same port: silent.
+        let tunnelled = vec!["https://mirth.internal:8444".to_string(), "4.6.0".to_string()];
+        assert!(detect_port_mismatch(configured, &tunnelled).is_none());
+
+        // Nothing URL-shaped, or an unparseable base: silent, not a wrong warning.
+        assert!(detect_port_mismatch(configured, &["4.6.0".to_string()]).is_none());
+        assert!(detect_port_mismatch("not a url", &args).is_none());
+
+        // Implicit default port on one side only.
+        let implicit = vec!["https://localhost".to_string()];
+        let m2 = detect_port_mismatch(configured, &implicit).expect("443 vs 8444 is a mismatch");
+        assert_eq!(443, m2.advertised_port);
     }
 
     #[test]

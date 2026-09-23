@@ -67,6 +67,13 @@ pub struct ConnectionEntry {
     pub show_console: bool,
     #[serde(default = "get_default_engine_type", rename = "engineType")]
     pub engine_type: String,
+    /// Silences the port-mismatch prompt for THIS connection only. Per
+    /// connection rather than global: the mismatch is a fact about one server's
+    /// configuration, so suppressing it is a judgement about that server. A
+    /// global switch would hide a genuine misconfiguration on some other server
+    /// set up months later, with no memory of having turned the warning off.
+    #[serde(default, rename = "suppressPortMismatch")]
+    pub suppress_port_mismatch: bool,
     /// Trusted server leaf-cert SHA-256 (hex). None = not yet trusted; the first
     /// launch prompts the operator (TOFU). Not a secret, so it lives in the JSON.
     #[serde(default, rename = "pinnedCertSha256")]
@@ -111,6 +118,7 @@ impl Default for ConnectionEntry {
             last_connected: None,
             show_console: false,
             engine_type: get_default_engine_type(),
+            suppress_port_mismatch: false,
             pinned_cert_sha256: None,
             icon_path: None,
             icon_glyph: None,
@@ -381,6 +389,19 @@ impl ConnectionStore {
         if let Some(entry) = cache.get(id) {
             let mut updated = (**entry).clone();
             updated.pinned_cert_sha256 = sha256;
+            cache.insert(id.to_string(), Arc::new(updated));
+        }
+        drop(cache);
+        self.write_connections_to_disk()?;
+        Ok(())
+    }
+
+    /// Persist the per-connection suppression of the port-mismatch prompt.
+    pub fn set_suppress_port_mismatch(&self, id: &str, suppress: bool) -> Result<(), Error> {
+        let mut cache = self.con_cache.lock().expect("connection cache lock poisoned");
+        if let Some(entry) = cache.get(id) {
+            let mut updated = (**entry).clone();
+            updated.suppress_port_mismatch = suppress;
             cache.insert(id.to_string(), Arc::new(updated));
         }
         drop(cache);
