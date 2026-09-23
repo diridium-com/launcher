@@ -11,6 +11,56 @@ const isNewConnection = connectionId === "new-connection"
 const groups: string[] = await invoke<string[]>("get_all_groups")
 const engineTypes: string[] = await invoke<string[]>("get_all_engine_types")
 
+// Where connections are persisted, resolved by the backend so the path shown
+// uses native separators. Named next to the password field because telling
+// someone their password is stored unencrypted is only actionable if they can
+// find the file.
+const storePath: string = JSON.parse(
+  await invoke<string>("get_launcher_info"),
+).store_path
+
+const showFieldHelp = ref(false)
+
+// Kept as data rather than markup so the dialog is a loop and the copy can be
+// read in one place. One dialog rather than a marker per field: seven of those
+// read as clutter on a panel this dense.
+const fieldHelp: { name: string; text: string }[] = [
+  { name: "Name", text: "What this connection is called in the list." },
+  {
+    name: "Address",
+    text: `The engine's base URL, or the full webstart.jnlp URL it gives you. Both forms work: https://hostname:port or https://hostname:port/webstart.jnlp`,
+  },
+  {
+    name: "Engine Type",
+    text: "Gives each engine fork and version its own cache of jars and extensions.",
+  },
+  {
+    name: "Security",
+    text: "The server's certificate is trusted on first connect and pinned afterwards. Forget it to be asked again on the next launch.",
+  },
+  {
+    name: "Java Home",
+    text: "The JDK used to launch the administrator. It must include JavaFX. Blank uses JAVA_HOME, or java on PATH.",
+  },
+  { name: "JVM Arguments", text: "Extra flags for the administrator's JVM." },
+  {
+    name: "Heap Size",
+    text: "Maximum heap for the administrator. Blank uses the value from the server's JNLP.",
+  },
+  { name: "Icon", text: "The icon shown for this connection and for its console window." },
+  {
+    name: "Username and Password",
+    text: `Optional. Leave both blank and the administrator will prompt you instead. They are stored unencrypted in ${storePath}. The password is also passed to the administrator on its command line, so it appears in the process list while the administrator is running.`,
+  },
+  { name: "Group", text: "Type a new group or select an existing one. Groups organise the connection list." },
+  { name: "Show console", text: "Shows the Administrator's Java console." },
+  {
+    name: "Do not cache",
+    text: "Re-downloads every jar on each launch. Slower, and uses a separate cache directory.",
+  },
+  { name: "Notes", text: "Free text about this connection. The Notes tab shows a dot when it has any." },
+]
+
 const isConnectionEdited = ref<boolean>(false)
 
 // Two tabs, not a general tabbed layout. Notes is the one field that wants room
@@ -92,10 +142,19 @@ const handleDelete = async () => {
 <template>
   <div class="bg-surface-0 flex flex-col h-full overflow-hidden">
     <!-- Header -->
-    <div class="px-5 pt-5 pb-4">
+    <div class="px-5 pt-5 pb-4 flex items-start justify-between gap-2">
       <h1 class="font-semibold text-lg text-text-primary">
         {{ isNewConnection ? "New Connection" : "Edit Connection" }}
       </h1>
+      <button
+        type="button"
+        class="text-text-tertiary hover:text-text-primary hover:cursor-pointer shrink-0"
+        aria-label="What do these fields mean?"
+        title="What do these fields mean?"
+        @click="showFieldHelp = true"
+      >
+        <icon name="ph:question" class="text-lg" />
+      </button>
     </div>
 
     <!-- Tabs -->
@@ -216,6 +275,37 @@ const handleDelete = async () => {
           </div>
         </section>
       </form>
+
+      <!-- Field help. One dialog for the whole panel: it can hold a sentence per
+           field and stay readable, which a native tooltip cannot, and it costs
+           the form no height. -->
+      <div
+        v-if="showFieldHelp"
+        class="absolute inset-0 z-[100] flex items-center justify-center bg-black/50 p-6"
+        @click.self="showFieldHelp = false"
+      >
+        <div class="bg-surface-1 border border-border rounded-lg shadow-overlay w-[34rem] max-h-full flex flex-col">
+          <div class="flex items-center justify-between p-5 pb-3">
+            <h2 class="font-semibold text-text-primary">Connection fields</h2>
+            <button
+              type="button"
+              class="text-text-tertiary hover:text-text-primary hover:cursor-pointer"
+              aria-label="Close"
+              @click="showFieldHelp = false"
+            >
+              <icon name="ph:x" class="text-sm" />
+            </button>
+          </div>
+          <div class="overflow-y-auto px-5 pb-5 space-y-3">
+            <div v-for="f in fieldHelp" :key="f.name" class="space-y-0.5">
+              <p class="text-sm font-medium text-text-primary select-none">{{ f.name }}</p>
+              <!-- select-text: the store path is in here and has to be copyable,
+                   which is the whole reason it is named rather than described. -->
+              <p class="text-xs text-text-tertiary leading-relaxed select-text break-words">{{ f.text }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <!-- Notes tab. Fills the panel it was given rather than stretching the
            settings form, which is the whole reason it moved here. -->

@@ -25,13 +25,19 @@ mod webstart;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tauri::command]
-async fn get_launcher_info() -> String {
+async fn get_launcher_info(cs: State<'_, ConnectionStore>) -> Result<String, String> {
     let mut obj = serde_json::Map::new();
     obj.insert(
         "launcher_version".to_string(),
         serde_json::Value::String(String::from(APP_VERSION)),
     );
-    serde_json::to_string(&obj).unwrap_or_default()
+    // Shown beside the password field. display() renders native separators, so
+    // a Windows operator sees a Windows path rather than a unix-looking one.
+    obj.insert(
+        "store_path".to_string(),
+        serde_json::Value::String(cs.store_path().display().to_string()),
+    );
+    Ok(serde_json::to_string(&obj).unwrap_or_default())
 }
 
 #[tauri::command(rename_all = "snake_case")]
