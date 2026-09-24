@@ -51,3 +51,8 @@ custom-protocol = ["tauri/custom-protocol"]
 [profile.dev]
 debug = "line-tables-only"
 
+[dev-dependencies]
+# Generates a self-signed certificate at test time so the suite can stand up a
+# real HTTPS server and exercise the pinned client, which is the only way to
+# reach WebstartFile::load end to end. Test-only; never shipped.
+rcgen = "0.13"

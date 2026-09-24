@@ -171,10 +171,19 @@ const launchServer = async (connection: Connection) => {
           return
         }
         if (suppress) {
-          await invoke("set_suppress_port_mismatch", {
-            connection_id: connection.id,
-            suppress: true,
-          })
+          // Guarded separately: this writes the whole connection store to disk,
+          // so it can fail on a permissions problem or a full disk. Without the
+          // catch that throw reaches the outer handler and reports "Launch
+          // failed" for a launch the operator just approved. Not remembering a
+          // preference is not a reason to cancel the launch it was attached to.
+          try {
+            await invoke("set_suppress_port_mismatch", {
+              connection_id: connection.id,
+              suppress: true,
+            })
+          } catch (e) {
+            console.warn("could not save the port-mismatch suppression:", e)
+          }
         }
         // Acknowledged for this run even when not suppressed, so the next
         // attempt in this loop does not prompt again.

@@ -125,9 +125,10 @@ async fn launch(id: String, force: bool, ack_port_mismatch: bool, on_progress: C
 
     let ws = match loaded {
         Err(e) => {
-            // A cache/engine collision is a distinct, recoverable outcome:
-            // surface it as code 4 with details so the frontend can confirm
-            // and retry with force=true, instead of a generic error.
+            // The server advertises a port the connection is not configured
+            // for: surface it as code 5 so the frontend can prompt, rather than
+            // failing the launch or letting it succeed into an administrator
+            // that cannot reach the server.
             if let Some(pm) = e.downcast_ref::<crate::webstart::PortMismatch>() {
                 return Ok(serde_json::json!({
                     "code": 5,
@@ -136,6 +137,9 @@ async fn launch(id: String, force: bool, ack_port_mismatch: bool, on_progress: C
                     "advertised_url": pm.advertised_url,
                 }).to_string());
             }
+            // A cache/engine collision is a distinct, recoverable outcome:
+            // surface it as code 4 with details so the frontend can confirm
+            // and retry with force=true, instead of a generic error.
             if let Some(cm) = e.downcast_ref::<crate::webstart::CacheMismatch>() {
                 return Ok(serde_json::json!({
                     "code": 4,
