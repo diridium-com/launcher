@@ -54,16 +54,6 @@ pub struct LoadConfig<'a> {
     pub acknowledge_cache_mismatch: bool,
 }
 
-/// Returned by `load` when the cache directory for this engine-type + version
-/// already contains *core* jars whose contents differ from what the server's
-/// JNLP declares. A given engine version always ships the identical core jar
-/// set, so a core difference under the same version means a *different* engine's
-/// jars are in this shared directory, which usually means two connections share
-/// an engine type but point at different engines. Extension jars are excluded:
-/// they are installed and upgraded independently of the engine version, so a
-/// changed extension jar is an upgrade, not a collision. Carried up as an
-/// `anyhow::Error` and downcast by the launch command into a distinct frontend
-/// code.
 /// The JNLP advertises a different port than the operator configured, so the
 /// administrator will try to log in somewhere the operator did not point it.
 ///
@@ -142,6 +132,16 @@ fn advertised_server_url(args: &[String]) -> Option<&String> {
     })
 }
 
+/// Returned by `load` when the cache directory for this engine-type + version
+/// already contains *core* jars whose contents differ from what the server's
+/// JNLP declares. A given engine version always ships the identical core jar
+/// set, so a core difference under the same version means a *different* engine's
+/// jars are in this shared directory, which usually means two connections share
+/// an engine type but point at different engines. Extension jars are excluded:
+/// they are installed and upgraded independently of the engine version, so a
+/// changed extension jar is an upgrade, not a collision. Carried up as an
+/// `anyhow::Error` and downcast by the launch command into a distinct frontend
+/// code.
 #[derive(Debug)]
 pub struct CacheMismatch {
     pub engine_type: String,
@@ -1015,6 +1015,7 @@ mod tests {
     use super::{
         advertised_server_url, build_client_args, classify_cached_jar, collect_jar_tasks,
         detect_port_mismatch, effective_port, get_dir_from_path, get_file_name_from_path,
+        PortMismatch,
         get_node, is_safe_basename, normalize_url, sanitize_for_path, sha256_of_file,
         split_jnlp_url, Channel, WebstartFile,
     };
@@ -1108,6 +1109,84 @@ mod tests {
     /// `collect_jar_tasks`, which fetches exactly one thing over the network:
     /// the extension's JNLP. The jars themselves are downloaded later, by
     /// `download_jars`, so nothing else is ever requested here.
+    /// A real HTTPS server holding one self-signed certificate, plus that
+    /// certificate's SHA-256 as the pin the launcher would have stored.
+    ///
+    /// This exists so `WebstartFile::load` can be tested end to end. `load`
+    /// fetches over `tls::pinned_client`, so a plain-HTTP mock cannot reach it
+    /// at all, and until this harness existed every test stopped at the helper
+    /// functions and nothing proved `load` calls them. Deleting the port check
+    /// from `load` used to leave the whole suite green.
+    ///
+    /// Returns (base_url, pin_hex, handle). Serves exactly one request, like
+    /// `serve_once`.
+    fn serve_once_tls(
+        body: &'static str,
+    ) -> (String, String, std::thread::JoinHandle<Option<String>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed cert");
+        let cert_der = cert.cert.der().to_vec();
+        let key_der = cert.key_pair.serialize_der();
+
+        // The pin the operator would have approved: SHA-256 over the leaf DER,
+        // which is exactly what PinnedVerifier compares against.
+        let pin_hex = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&cert_der);
+            h.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>()
+        };
+
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(cert_der)],
+                rustls::pki_types::PrivateKeyDer::try_from(key_der).expect("private key"),
+            )
+            .expect("server config");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut conn = match rustls::ServerConnection::new(std::sync::Arc::new(server_config))
+                {
+                    Ok(c) => c,
+                    Err(_) => return None,
+                };
+                // Drive the handshake and the single exchange. Errors are
+                // ignored: a client that hangs up mid-handshake is the test
+                // failing elsewhere, and panicking here would mask it.
+                let mut tls = rustls::Stream::new(&mut conn, &mut stream);
+                let mut buf = [0u8; 4096];
+                let n = tls.read(&mut buf).unwrap_or(0);
+                // The request line, so a test can assert which path was asked
+                // for. That is the only way to prove load() resolved the URL
+                // the way it claims to.
+                let request_line = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .map(|l| l.to_string());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = tls.write_all(resp.as_bytes());
+                let _ = tls.flush();
+                return request_line;
+            }
+            None
+        });
+
+        (format!("https://localhost:{}", addr.port()), pin_hex, handle)
+    }
+
     fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
@@ -1246,11 +1325,11 @@ mod tests {
     /// so that form must be used as given rather than appended to (#21). A base
     /// address, with or without a context path, must keep behaving as before.
     ///
-    /// This pins the function, NOT the call site: reverting load() to append
-    /// unconditionally leaves this test green. What stops that regression is
-    /// structural rather than a test, so keep it that way: the only
-    /// "{}/webstart.jnlp" append in this file lives inside split_jnlp_url, so
-    /// there is no second path to the JNLP url to drift out of step.
+    /// This pins the function. The call site is pinned separately by
+    /// `load_requests_the_jnlp_path_it_was_given`, which asserts the path the
+    /// server was actually asked for; reverting load() to append
+    /// unconditionally fails that test with
+    /// `GET /webstart.jnlp/webstart.jnlp`.
     #[test]
     fn split_jnlp_url_honours_an_address_that_is_already_a_jnlp() -> Result<(), Error> {
         let candidates = [
@@ -1462,6 +1541,149 @@ mod tests {
         let implicit = vec!["https://localhost".to_string()];
         let m2 = detect_port_mismatch(configured, &implicit).expect("443 vs 8444 is a mismatch");
         assert_eq!(443, m2.advertised_port);
+    }
+
+    /// The gap this harness exists to close: `detect_port_mismatch` was well
+    /// covered, but nothing proved `load` calls it. Deleting the check from
+    /// `load` left every other test green.
+    ///
+    /// Drives the real path: pinned TLS client, real HTTPS server, real JNLP.
+    #[test]
+    fn load_raises_port_mismatch_and_honours_the_acknowledgement() {
+        // Advertises 8443 while the test server answers on an ephemeral port,
+        // which is the shape a Docker port mapping produces.
+        const JNLP: &str = concat!(
+            "<?xml version=\"1.0\"?>\n",
+            "<jnlp codebase=\"https://localhost\" version=\"4.6.0\">\n",
+            "  <resources><j2se version=\"1.9+\"/></resources>\n",
+            "  <application-desc main-class=\"com.mirth.connect.client.ui.Mirth\">\n",
+            "    <argument>https://localhost:8443</argument>\n",
+            "    <argument>4.6.0</argument>\n",
+            "  </application-desc>\n",
+            "</jnlp>"
+        );
+
+        fn run(ack: bool, cache_root: &PathBuf) -> Result<WebstartFile, Error> {
+            let (base_url, pin_hex, server) = serve_once_tls(JNLP);
+            let on_progress: Channel<serde_json::Value> = Channel::new(|_| Ok(()));
+            let logs = cache_root.join("logs");
+            std::fs::create_dir_all(&logs).expect("logs dir");
+            let out = WebstartFile::load(super::LoadConfig {
+                base_url: &base_url,
+                cache_dir: cache_root,
+                donotcache: false,
+                conn_id: "test-conn",
+                conn_name: "Test",
+                engine_type: "Open Integration Engine",
+                logs_dir: &logs,
+                on_progress: &on_progress,
+                pinned_cert_sha256: Some(pin_hex),
+                acknowledge_port_mismatch: ack,
+                acknowledge_cache_mismatch: false,
+            });
+            server.join().ok();
+            out
+        }
+
+        let cache_root =
+            std::env::temp_dir().join(format!("launcher-loadtls-{}", std::process::id()));
+        std::fs::create_dir_all(&cache_root).expect("cache root");
+
+        // Not acknowledged: the advertised 8443 does not match the server's
+        // actual port, so load must refuse with PortMismatch.
+        let err = run(false, &cache_root).expect_err("a mismatched port must stop the launch");
+        let pm = err
+            .downcast_ref::<PortMismatch>()
+            .expect("the failure must be PortMismatch, not a generic error");
+        assert_eq!(8443, pm.advertised_port);
+        assert_eq!("https://localhost:8443", pm.advertised_url);
+        assert_ne!(
+            pm.configured_port, pm.advertised_port,
+            "the configured port is the ephemeral one the server bound"
+        );
+
+        // Acknowledged: the same JNLP must get past the check. It has no jars,
+        // so load runs to completion.
+        let ws = run(true, &cache_root).expect("an acknowledged mismatch must not block the launch");
+        assert_eq!("com.mirth.connect.client.ui.Mirth", ws.main_class);
+        assert_eq!(
+            vec!["https://localhost:8443".to_string(), "4.6.0".to_string()],
+            ws.args,
+            "the JNLP arguments must survive to the launch unchanged"
+        );
+
+        std::fs::remove_dir_all(&cache_root).ok();
+    }
+
+    /// The other gap the TLS harness closes. `split_jnlp_url` was tested
+    /// directly, but nothing proved `load` used it: reverting load() to append
+    /// unconditionally left the suite green, and only a structural argument
+    /// (the append existing in one place) stood in for a test.
+    ///
+    /// This asserts the path the server was actually asked for, which is the
+    /// only evidence that settles it.
+    #[test]
+    fn load_requests_the_jnlp_path_it_was_given() {
+        // No URL-shaped argument, so the port check stays out of the way and
+        // this test is only about URL resolution.
+        const JNLP: &str = concat!(
+            "<?xml version=\"1.0\"?>\n",
+            "<jnlp version=\"4.6.0\">\n",
+            "  <resources><j2se version=\"1.9+\"/></resources>\n",
+            "  <application-desc main-class=\"com.mirth.connect.client.ui.Mirth\">\n",
+            "    <argument>4.6.0</argument>\n",
+            "  </application-desc>\n",
+            "</jnlp>"
+        );
+
+        fn requested_path(address_suffix: &str, cache_root: &PathBuf) -> String {
+            let (base_url, pin_hex, server) = serve_once_tls(JNLP);
+            let on_progress: Channel<serde_json::Value> = Channel::new(|_| Ok(()));
+            let logs = cache_root.join("logs");
+            std::fs::create_dir_all(&logs).expect("logs dir");
+            let address = format!("{}{}", base_url, address_suffix);
+            WebstartFile::load(super::LoadConfig {
+                base_url: &address,
+                cache_dir: cache_root,
+                donotcache: false,
+                conn_id: "test-conn",
+                conn_name: "Test",
+                engine_type: "Open Integration Engine",
+                logs_dir: &logs,
+                on_progress: &on_progress,
+                pinned_cert_sha256: Some(pin_hex),
+                acknowledge_port_mismatch: false,
+                acknowledge_cache_mismatch: false,
+            })
+            .expect("load should succeed");
+            server.join().expect("server thread").expect("a request line")
+        }
+
+        let cache_root =
+            std::env::temp_dir().join(format!("launcher-loadpath-{}", std::process::id()));
+        std::fs::create_dir_all(&cache_root).expect("cache root");
+
+        // A bare server address gets the default file name appended.
+        assert!(
+            requested_path("", &cache_root).starts_with("GET /webstart.jnlp "),
+            "a base address must fetch /webstart.jnlp"
+        );
+
+        // An address that already names the JNLP is used as given. Appending
+        // again produced /webstart.jnlp/webstart.jnlp, which is issue #21.
+        let p = requested_path("/webstart.jnlp", &cache_root);
+        assert!(
+            p.starts_with("GET /webstart.jnlp "),
+            "an address naming the JNLP must be used as given, got: {}",
+            p
+        );
+        assert!(
+            !p.contains("/webstart.jnlp/webstart.jnlp"),
+            "the path must not be doubled, got: {}",
+            p
+        );
+
+        std::fs::remove_dir_all(&cache_root).ok();
     }
 
     #[test]
