@@ -15,6 +15,40 @@ Originally forked from [Ballista](https://github.com/kayyagari/ballista) by [Kir
 > many engines from one machine, or need a native app, but for a lot of people the web
 > administrator is the simpler answer.
 
+## Requirements
+
+- **A JavaFX-enabled JDK.** The administrator is a JavaFX application, so a plain JRE will not run it.
+  Launcher neither installs nor downloads Java. Set a `Java Home` per connection, or let Launcher use
+  `JAVA_HOME` or the `java` on your `PATH`.
+- **Windows:** Windows 10 or later, or Windows Server 2016 or later, plus the Microsoft Edge WebView2
+  Runtime. Windows 11 includes WebView2, and most Windows 10 machines have it by way of Microsoft Edge,
+  but Windows Server images frequently do not.
+- **macOS:** nothing additional. The system WebView is part of the OS.
+- **Linux:** the `.deb` and `.rpm` need `libwebkit2gtk-4.1-0` and `libgtk-3-0` from your distribution.
+  The AppImage carries its own, so it is the better choice on a machine without repository access.
+
+### Installing on Windows without internet access
+
+If WebView2 is already installed, the installer leaves it alone and downloads nothing. If it is
+missing, the installer downloads it from Microsoft, which needs working internet access.
+
+On a machine with no internet access that download fails and the installation does not finish. The
+`.exe` reports `Failed to install WebView2! The app can't run without it. Try restarting the
+installer.` and the `.msi` reports a generic Windows Installer error. Restarting does not help, because
+nothing on the machine can reach Microsoft.
+
+Install WebView2 first:
+
+1. On a machine that does have internet access, download the **Evergreen Standalone Installer** for the
+   target machine's architecture from https://developer.microsoft.com/microsoft-edge/webview2/
+2. Copy it to the target machine and run it.
+3. Run the Launcher installer again.
+
+Take the Standalone Installer, not the Bootstrapper on the same page. The Bootstrapper downloads the
+runtime when it runs, so it fails the same way.
+
+WebView2 is the only thing the installer downloads, and Launcher has no auto-updater.
+
 ## How To Use
 
 1. Go to releases and download a suitable installer for your OS platform
