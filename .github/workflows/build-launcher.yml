@@ -93,7 +93,53 @@ jobs:
 
       - name: npm security audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        run: npm audit --audit-level=high
+        # npm audit has no ignore list, so this filters its JSON report. It fails
+        # on any high or critical advisory not in ALLOWED, on an ALLOWED advisory
+        # that is no longer reported, and when npm audit produces no report.
+        #
+        # ALLOWED, checked 2026-10-22. Both advisories cover every published
+        # version and have no patched release, and both packages are Nuxt build
+        # and dev-server dependencies. Once a fix ships and the lockfile picks it
+        # up, this step fails until the ID is removed.
+        #   GHSA-vfj7-8cjw-p6xm  braces, via micromatch, fast-glob and nitropack
+        #   GHSA-86w9-cpqp-85rv  node-forge, via listhen and @nuxt/cli
+        env:
+          ALLOWED: GHSA-vfj7-8cjw-p6xm GHSA-86w9-cpqp-85rv
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP:-/tmp}/npm-audit.json"
+          # npm audit exits non-zero whenever it finds anything, so the report decides.
+          npm audit --json > "$report" || true
+          if ! jq -e '.vulnerabilities | type == "object"' "$report" > /dev/null 2>&1; then
+            echo "::error::npm audit did not produce a report"
+            cat "$report"
+            exit 1
+          fi
+          # One line per high or critical advisory: id, the packages it flags, title. A
+          # package flagged only through one of its dependencies carries no advisory of
+          # its own, so it adds nothing here. An advisory without a GHSA id is listed by
+          # its URL or source number, which is never in ALLOWED, so it fails.
+          jq -r '
+            [.vulnerabilities[].via[] | objects
+             | select(.severity == "high" or .severity == "critical")
+             | (.url // (.source | tostring)) as $u
+             | {id: (($u | capture("(?<id>GHSA(-[0-9a-z]{4}){3})") | .id) // $u), name, title}]
+            | group_by(.id) | .[]
+            | "\(.[0].id)\t\(map(.name) | unique | join(", "))\t\(.[0].title)"' "$report" > "$report.found"
+          status=0
+          while IFS=$'\t' read -r id name title; do
+            case " $ALLOWED " in
+              *" $id "*) echo "allowed: $id ($name)" ;;
+              *) echo "::error::$id $name: $title"; status=1 ;;
+            esac
+          done < "$report.found"
+          for id in $ALLOWED; do
+            if ! awk -F'\t' -v id="$id" '$1 == id { found = 1 } END { exit !found }' "$report.found"; then
+              echo "::error::$id is no longer reported; remove it from ALLOWED"
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Verify tag matches manifest version
         # tauri-action names and tags the release from the manifest version
