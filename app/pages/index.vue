@@ -115,11 +115,6 @@ const { trustCertificate, confirmCertChange, confirmCacheMismatch, confirmPortMi
   useConfirmRejectModal()
 
 const launchServer = async (connection: Connection) => {
-  const onProgress = new Channel<{ message: string }>()
-  onProgress.onmessage = ({ message }) => {
-    progressMessage.value = message
-  }
-
   try {
     // Loop so a certificate trust prompt can be shown, then the launch retried.
     // code 0 = launched, 2 = first-use trust, 3 = cert changed, 4 = cache
@@ -133,6 +128,15 @@ const launchServer = async (connection: Connection) => {
       if (attempts++ > 4) {
         launchError.value = "Launch aborted: the server certificate keeps changing."
         return
+      }
+      // A new Channel for every attempt. Tauri ends a Channel when the command
+      // it was passed to returns, and the JS side unregisters its callback on
+      // that end message. One Channel reused across the retry after a trust or
+      // confirmation prompt delivered nothing, so a new connection sat on
+      // "Connecting..." for its whole download.
+      const onProgress = new Channel<{ message: string }>()
+      onProgress.onmessage = ({ message }) => {
+        progressMessage.value = message
       }
       const resp = JSON.parse(
         await invoke<string>("launch", {
