@@ -13,8 +13,76 @@ on:
       - "*.md"
   workflow_dispatch:
 
+# Read-only unless a job asks for more.
+permissions:
+  contents: read
+
 jobs:
+  # Runs once, on Linux, before any build. The release step below runs on five
+  # runners with fail-fast off, so a guard inside that matrix could fail on one
+  # runner while the other four still uploaded. On a branch or PR push every
+  # step is skipped and the job passes.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Refuse a tag whose release is already published
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if DRAFT="$(gh release view "$GITHUB_REF_NAME" --json isDraft -q .isDraft 2>&1)"; then
+            if [ "$DRAFT" != "true" ]; then
+              echo "::error::Release ${GITHUB_REF_NAME} is already published. Its files are never replaced; release a new version."
+              exit 1
+            fi
+            echo "A draft exists for ${GITHUB_REF_NAME}; the build will update it."
+          elif [ "$DRAFT" = "release not found" ]; then
+            # This job's token is read-only, and GitHub hides drafts from it, so
+            # an existing draft also lands here. Only a published release has to
+            # be refused, and a published release is always visible.
+            echo "No published release exists for ${GITHUB_REF_NAME}."
+          else
+            # Anything else (network, permissions) must not be taken for "no release".
+            echo "::error::Could not check for an existing release: $DRAFT"
+            exit 1
+          fi
+
+      - name: Check the tag against every version file
+        # tauri-action names and tags the release from package.json, not from
+        # the pushed tag, so a mismatch would mis-tag the release.
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          check() {
+            if [ "$2" != "$VERSION" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} is version ${VERSION}, but $1 says '$2'."
+              FAILED=1
+            fi
+          }
+          FAILED=0
+          check "package.json version" "$(jq -r .version package.json)"
+          check "package-lock.json version" "$(jq -r .version package-lock.json)"
+          check "package-lock.json packages[\"\"].version" \
+            "$(jq -r '.packages[""].version' package-lock.json)"
+          check "src-tauri/Cargo.toml version" \
+            "$(awk '/^\[/ { p = ($0 == "[package]") } p && /^version = / { gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.toml)"
+          check "src-tauri/Cargo.lock launcher version" \
+            "$(awk '$0 == "name = \"launcher\"" { getline; gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.lock)"
+          if [ "$FAILED" -ne 0 ]; then
+            echo "Set the version in every file listed above (RELEASING.md, step 1) and tag again."
+            exit 1
+          fi
+
   release:
+    needs: guard
+    # Write access is for tauri-action creating the draft release on a tag push.
+    # Branch and PR builds hold it too, until building and releasing are split
+    # into separate jobs.
     permissions:
       contents: write
     strategy:
@@ -45,7 +113,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install dependencies (ubuntu only)
         if: startsWith(matrix.platform, 'ubuntu')
@@ -54,13 +122,17 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Rust setup
-        uses: dtolnay/rust-toolchain@stable
+        # Pinned to the commit the stable branch pointed at on 2026-10-23. Pinned
+        # by commit, the action can't read the toolchain from the ref name, so it
+        # is named below.
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.rust-targets }}
           components: clippy
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: "./src-tauri -> target"
 
@@ -73,7 +145,7 @@ jobs:
 
       - name: Install cargo-audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-audit
 
@@ -83,13 +155,19 @@ jobs:
         run: cargo audit
 
       - name: Sync node version and setup cache
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          # Without this, setup-node uses whatever 24.x the runner image already
+          # has. On 2026-10-22 that was 24.21.0 on macOS and Linux, which
+          # CVE-2026-111497 (Node2Shell, fixed in 24.22.1) affects.
+          check-latest: true
           cache: "npm"
 
       - name: Install frontend dependencies
-        run: npm install
+        # npm ci installs exactly what package-lock.json names and fails if it
+        # disagrees with package.json; npm install could resolve something else.
+        run: npm ci
 
       - name: npm security audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
@@ -141,27 +219,13 @@ jobs:
           done
           exit $status
 
-      - name: Verify tag matches manifest version
-        # tauri-action names and tags the release from the manifest version
-        # (package.json), not the pushed tag. If they diverge, the release would
-        # be mis-tagged and could clobber an existing one. Fail fast on mismatch.
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        shell: bash
-        run: |
-          manifest="v$(node -p "require('./package.json').version")"
-          if [ "$GITHUB_REF_NAME" != "$manifest" ]; then
-            echo "::error::Pushed tag $GITHUB_REF_NAME does not match manifest version $manifest. Bump package.json and src-tauri/Cargo.toml to match the tag."
-            exit 1
-          fi
-          echo "tag $GITHUB_REF_NAME matches manifest $manifest"
-
       - name: Build the app and release
         # Release ONLY when a version tag (vX.Y.Z) is pushed, not on every master
         # push. Pushing a v* tag builds and drafts a release for that version;
         # regular branch/PR pushes only build (step below). This stops later
         # master merges from re-uploading over an already-published release.
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -189,15 +253,14 @@ jobs:
           args: ${{ matrix.args }}
 
       - name: Build the app
+        # No token: with no tagName or releaseId, tauri-action only builds.
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         with:
           args: ${{ matrix.args }}
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact-name }}
           path: |
@@ -212,17 +275,17 @@ jobs:
             src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app
 
   # Aggregating gate: one stable check to mark as required in branch protection.
-  # Green only if every leg of the release matrix succeeded.
+  # Green only if the guard and every leg of the release matrix succeeded.
   ci-success:
     name: ci-success
-    needs: [release]
+    needs: [guard, release]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Verify all matrix builds succeeded
+      - name: Verify the guard and all matrix builds succeeded
         run: |
-          if [ "${{ needs.release.result }}" != "success" ]; then
-            echo "Matrix build did not succeed: ${{ needs.release.result }}"
+          if [ "${{ needs.guard.result }}" != "success" ] || [ "${{ needs.release.result }}" != "success" ]; then
+            echo "Guard: ${{ needs.guard.result }}, matrix builds: ${{ needs.release.result }}"
             exit 1
           fi
-          echo "All matrix builds succeeded."
+          echo "Guard and all matrix builds succeeded."
