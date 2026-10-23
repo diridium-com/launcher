@@ -175,14 +175,15 @@ jobs:
         # on any high or critical advisory not in ALLOWED, on an ALLOWED advisory
         # that is no longer reported, and when npm audit produces no report.
         #
-        # ALLOWED, checked 2026-10-22. Both advisories cover every published
-        # version and have no patched release, and both packages are Nuxt build
-        # and dev-server dependencies. Once a fix ships and the lockfile picks it
-        # up, this step fails until the ID is removed.
-        #   GHSA-vfj7-8cjw-p6xm  braces, via micromatch, fast-glob and nitropack
+        # ALLOWED, checked 2026-10-23. The advisory covers every published
+        # version and has no patched release, and the package is a Nuxt
+        # dev-server dependency. Once a fix ships and the lockfile picks it up,
+        # this step fails until the ID is removed.
         #   GHSA-86w9-cpqp-85rv  node-forge, via listhen and @nuxt/cli
+        # (GHSA-vfj7-8cjw-p6xm, braces, was allowed until GitHub withdrew it on
+        # 2026-10-23.)
         env:
-          ALLOWED: GHSA-vfj7-8cjw-p6xm GHSA-86w9-cpqp-85rv
+          ALLOWED: GHSA-86w9-cpqp-85rv
         run: |
           set -euo pipefail
           report="${RUNNER_TEMP:-/tmp}/npm-audit.json"
