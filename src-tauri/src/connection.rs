@@ -329,10 +329,10 @@ impl ConnectionStore {
             return Ok(result.to_string());
         }
 
-        let java_home = find_java_home();
+        let default_java_home = find_java_home();
         let count = data.len();
         for mut ce in data {
-            ce.java_home = java_home.clone();
+            ce.java_home = imported_java_home(&ce.java_home, &default_java_home);
             cache.insert(ce.id.clone(), Arc::new(ce));
         }
         drop(cache);
@@ -447,6 +447,19 @@ pub fn find_java_home() -> String {
     }
 }
 
+/// The Java Home an imported connection keeps. The file may come from another
+/// machine (another Launcher's export, or MCAL's connections.json), so its path
+/// is kept only when that folder exists here. Otherwise the connection gets this
+/// machine's default, as a new connection would.
+fn imported_java_home(imported: &str, default: &str) -> String {
+    let jh = imported.trim();
+    if !jh.is_empty() && Path::new(jh).is_dir() {
+        jh.to_string()
+    } else {
+        default.to_string()
+    }
+}
+
 fn get_default_group() -> String {
     String::from("Default")
 }
@@ -465,9 +478,64 @@ fn get_default_engine_type() -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{create_private_file, ConnectionStore};
+    use super::{create_private_file, find_java_home, imported_java_home, ConnectionStore};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A folder name no test run has used, so a test can create it without
+    /// clearing anything first.
+    fn fresh_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("launcher-{}-{}-{}", label, std::process::id(), nanos))
+    }
+
+    #[test]
+    fn imported_java_home_keeps_a_folder_that_exists_here() {
+        let here = std::env::temp_dir();
+        let here = here.to_str().expect("temp dir is UTF-8");
+        assert_eq!(imported_java_home(here, "/default/jdk"), here);
+        // Surrounding whitespace from a hand-edited file is not part of the path.
+        assert_eq!(imported_java_home(&format!("  {}  ", here), "/default/jdk"), here);
+    }
+
+    #[test]
+    fn imported_java_home_falls_back_when_the_folder_is_missing_or_blank() {
+        let missing = fresh_dir("no-such-java-home");
+        let missing = missing.to_str().expect("temp dir is UTF-8");
+        assert_eq!(imported_java_home(missing, "/default/jdk"), "/default/jdk");
+        assert_eq!(imported_java_home("", "/default/jdk"), "/default/jdk");
+        assert_eq!(imported_java_home("   ", "/default/jdk"), "/default/jdk");
+    }
+
+    /// Through import() itself: one connection's Java Home exists on this
+    /// machine and is kept, the other's doesn't and gets the default.
+    #[test]
+    fn import_keeps_existing_java_home_and_replaces_a_missing_one() {
+        let data_dir = fresh_dir("import");
+        let jre = data_dir.join("jre-fx");
+        fs::create_dir_all(&jre).expect("create jre dir");
+        let missing = data_dir.join("not-installed-here");
+        let store = ConnectionStore::init(data_dir.clone()).expect("init store");
+
+        let file = data_dir.join("export.json");
+        let export = serde_json::json!([
+            {"id": "kept-0000", "name": "Kept", "address": "https://127.0.0.1:8443",
+             "heapSize": "512m", "javaHome": jre.to_str().unwrap(), "javaArgs": ""},
+            {"id": "replaced-0000", "name": "Replaced", "address": "https://127.0.0.1:8444",
+             "heapSize": "512m", "javaHome": missing.to_str().unwrap(), "javaArgs": ""}
+        ]);
+        fs::write(&file, export.to_string()).expect("write export");
+
+        store.import(file.to_str().unwrap(), false).expect("import");
+
+        assert_eq!(store.get("kept-0000").expect("kept").java_home, jre.to_str().unwrap());
+        assert_eq!(store.get("replaced-0000").expect("replaced").java_home, find_java_home());
+
+        fs::remove_dir_all(&data_dir).ok();
+    }
 
     /// delete() has to remove the per-connection files, because once the entry
     /// is gone nothing can reach them: an isolated cache dir runs to ~90MB and
