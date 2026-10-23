@@ -154,13 +154,13 @@ jobs:
       - name: Sync node version and setup cache
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
-          # Without this, setup-node uses whatever 24.x the runner image already
-          # has. On 2026-10-22 that was 24.21.0 on macOS and Linux, which
-          # CVE-2026-111497 (Node2Shell, fixed in 24.22.1) affects. Taking a
-          # Node release younger than 14 days is the security exception to the
-          # 14-day wait: 24.22.1 came out on 2026-10-21 with that fix.
-          check-latest: true
+          # Pinned exactly, so every runner uses the same Node instead of whatever
+          # 24.x its image carries. 24.21.0 (2026-09-07) is the newest 24.x at
+          # least 14 days old. 24.22.1 (2026-10-20) fixes CVE-2026-111497
+          # (Node2Shell), but Node here only builds and never ships in the app,
+          # so it waits the 14 days like any build-only tool: move to 24.22.1 on
+          # or after 2026-11-03.
+          node-version: 24.21.0
           cache: "npm"
 
       - name: Install frontend dependencies
