@@ -178,15 +178,31 @@ jobs:
         # on any high or critical advisory not in ALLOWED, on an ALLOWED advisory
         # that is no longer reported, and when npm audit produces no report.
         #
-        # ALLOWED, checked 2026-10-23. The advisory covers every published
-        # version and has no patched release, and the package is a Nuxt
-        # dev-server dependency. Once a fix ships and the lockfile picks it up,
-        # this step fails until the ID is removed.
-        #   GHSA-86w9-cpqp-85rv  node-forge, via listhen and @nuxt/cli
+        # ALLOWED: advisories in packages that only run during the build. None
+        # of their code is in the shipped frontend (.output/public): their string
+        # literals were searched for there, with @tauri-apps/api as the control
+        # (checked 2026-11-05 at 0190879). Once the lockfile picks up a fixed
+        # version, this step fails until its IDs are removed.
+        #   node-forge, via listhen and @nuxt/cli, the Nuxt dev server:
+        #     GHSA-86w9-cpqp-85rv  (2026-10-23, no fixed release then)
+        #     GHSA-5x38-2vff-x55p, GHSA-7wch-p9px-956x, GHSA-8hrf-8g6f-7xwp,
+        #     GHSA-hqq3-7jhf-c5jx, GHSA-jc66-7q78-782g  (2026-11-05)
+        #   seroval, via @nuxt/vite-builder, which writes the build manifest:
+        #     GHSA-7rv5-mrxv-xcr9, GHSA-97r2-qh9m-474h, GHSA-wp97-x4hv-qvhp
+        #     (2026-11-05)
         # (GHSA-vfj7-8cjw-p6xm, braces, was allowed until GitHub withdrew it on
         # 2026-10-23.)
         env:
-          ALLOWED: GHSA-86w9-cpqp-85rv
+          ALLOWED: >-
+            GHSA-86w9-cpqp-85rv
+            GHSA-5x38-2vff-x55p
+            GHSA-7wch-p9px-956x
+            GHSA-8hrf-8g6f-7xwp
+            GHSA-hqq3-7jhf-c5jx
+            GHSA-jc66-7q78-782g
+            GHSA-7rv5-mrxv-xcr9
+            GHSA-97r2-qh9m-474h
+            GHSA-wp97-x4hv-qvhp
         run: |
           set -euo pipefail
           report="${RUNNER_TEMP:-/tmp}/npm-audit.json"
