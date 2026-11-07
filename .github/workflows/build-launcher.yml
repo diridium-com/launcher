@@ -273,6 +273,40 @@ jobs:
           path: release-files/
           if-no-files-found: error
 
+      - name: Make the files to sign (Windows only)
+        # A release signs Launcher.exe before its installers are built (RELEASING.md).
+        # Tauri marks the exe with the installer type while building each installer
+        # and puts the unmarked exe back afterwards, so the two copies to sign are
+        # marked here the same way, by scripts/patch-bundle-type.py, and each must be
+        # byte-identical to the exe inside this run's own unsigned installer. The
+        # SHA-256s printed here are what the signing session checks the downloads
+        # against.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="$(python -c 'import json; print(json.load(open("package.json"))["version"])')"
+          case "$RUNNER_ARCH" in X64) A=x64 ;; ARM64) A=arm64 ;; *) echo "::error::unexpected runner architecture $RUNNER_ARCH"; exit 1 ;; esac
+          mkdir sign-inputs
+          python scripts/patch-bundle-type.py src-tauri/target/release/Launcher.exe "sign-inputs/Launcher_${V}_${A}-nsis.exe" nsis
+          python scripts/patch-bundle-type.py src-tauri/target/release/Launcher.exe "sign-inputs/Launcher_${V}_${A}-msi.exe" msi
+          # 7-Zip names the files inside an MSI by their WiX ids; Tauri's template gives
+          # the main binary the id "Path" (tauri-bundler, windows/msi/main.wxs).
+          7z x -y -o"$RUNNER_TEMP/in-setup" "release-files/Launcher_${V}_${A}-setup.exe" Launcher.exe > /dev/null
+          7z x -y -o"$RUNNER_TEMP/in-msi" "release-files/Launcher_${V}_${A}_en-US.msi" Path > /dev/null
+          cmp "$RUNNER_TEMP/in-setup/Launcher.exe" "sign-inputs/Launcher_${V}_${A}-nsis.exe"
+          cmp "$RUNNER_TEMP/in-msi/Path" "sign-inputs/Launcher_${V}_${A}-msi.exe"
+          echo "Both copies match the exe inside this run's installers."
+          (cd sign-inputs && sha256sum -- *)
+
+      - name: Upload the files to sign (Windows only)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sign-inputs-${{ matrix.artifact-name }}
+          path: sign-inputs/
+          if-no-files-found: error
+
   # Every run: gathers the five builds' files and checks they are exactly the
   # twelve a release carries, so a branch or PR build tests nearly all of the
   # release path. Read-only.
@@ -325,6 +359,10 @@ jobs:
   # files and creates the draft release, or refills an existing draft on a
   # re-run: no checkout, no build tools, no third-party action. A human reviews
   # and publishes the draft.
+  #
+  # The draft gets the 8 macOS and Linux files only. The 4 Windows installers are
+  # signed after this run and added to the draft then (RELEASING.md); the unsigned
+  # ones built here never go in it.
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [guard, collect]
@@ -364,6 +402,14 @@ jobs:
           | \`Launcher_${V}_arm64.deb\` | Linux ARM64 deb |
           | \`Launcher-${V}-1.aarch64.rpm\` | Linux ARM64 rpm |
           EOF
+          files=()
+          for f in release-files/*; do
+            case "$f" in *.exe|*.msi) ;; *) files+=("$f") ;; esac
+          done
+          if [ "${#files[@]}" -ne 8 ]; then
+            echo "::error::Expected the 8 macOS and Linux files, found ${#files[@]}: ${files[*]}"
+            exit 1
+          fi
           # This job's token can see drafts, unlike the guard's, so a draft
           # left by an earlier run is refilled rather than duplicated.
           if DRAFT="$(gh release view "$GITHUB_REF_NAME" --json isDraft -q .isDraft 2>&1)"; then
@@ -371,11 +417,19 @@ jobs:
               echo "::error::Release ${GITHUB_REF_NAME} is already published. Its files are never replaced; release a new version."
               exit 1
             fi
-            gh release upload "$GITHUB_REF_NAME" release-files/* --clobber
+            # Windows files in the draft were signed from an earlier run's build,
+            # which this run replaces, so they must not stay beside its files.
+            windows="$(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name | select(endswith(".exe") or endswith(".msi"))')"
+            if [ -n "$windows" ]; then
+              echo "::error::The draft already has Windows files signed from an earlier run. Delete them from the draft, then re-run; this run's files need signing again (RELEASING.md)."
+              echo "$windows"
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
             gh release edit "$GITHUB_REF_NAME" --notes-file "$notes"
             echo "Refilled the existing draft for ${GITHUB_REF_NAME}."
           elif [ "$DRAFT" = "release not found" ]; then
-            gh release create "$GITHUB_REF_NAME" release-files/* --draft --verify-tag \
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --draft --verify-tag \
               --title "Launcher ${GITHUB_REF_NAME}" --notes-file "$notes"
             echo "Created the draft for ${GITHUB_REF_NAME}."
           else

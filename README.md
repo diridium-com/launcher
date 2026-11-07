@@ -49,6 +49,25 @@ runtime when it runs, so it fails the same way.
 
 WebView2 is the only thing the installer downloads, and Launcher has no auto-updater.
 
+### Checking a download
+
+Every release file is built by GitHub Actions from the release's tag in this repository, and its
+SHA-256 is listed on the release page.
+
+From 2.4.1 on, the Windows installers (`.exe` and `.msi`) and the `Launcher.exe` they install are
+signed by Diridium Technologies, Inc. To check one, open the file's Properties and its Digital
+Signatures tab, or in PowerShell:
+
+```
+Get-AuthenticodeSignature .\Launcher_2.4.1_x64-setup.exe
+```
+
+The status should be `Valid` and the signer `Diridium Technologies, Inc.`. Two kinds of file the
+setup.exe writes are not signed: its `uninstall.exe`, and the helper DLLs it uses while it runs.
+AppLocker or WDAC rules can allow Launcher by publisher; allow `uninstall.exe` (and the helper DLLs,
+where DLL rules are on) by hash or path. The macOS and Linux files are not signed; check them against
+the SHA-256 on the release page.
+
 ## How To Use
 
 1. Go to releases and download a suitable installer for your OS platform

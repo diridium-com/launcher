@@ -1,0 +1,186 @@
+name: Test the draft's Windows installers
+
+# Run by hand for a release (RELEASING.md), once the draft has its four signed
+# Windows installers. Each installer gets its own fresh runner (an MSI reuses the
+# folder an earlier NSIS install left in the registry, tauri-bundler main.wxs, so the
+# two must not share one): check its Authenticode signature, install it silently,
+# check the installed Launcher.exe is signed and identical to the one inside the
+# installer, start it and see it stay up, uninstall it. Tests the files users will
+# download, not a fresh build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v2.4.1"
+        required: true
+      signer:
+        description: "Expected signer's common name"
+        required: true
+        default: "Diridium Technologies, Inc."
+      trust_cert:
+        description: "Dry runs only: a test signing certificate (PEM, base64) for the runner to trust. Leave empty for a release."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # The only job that can write, because only a token that can write sees a draft.
+  # It downloads the four installers and hands them on: no checkout, no build tools.
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the draft's Windows installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Not a release tag: $TAG"; exit 1 ;;
+          esac
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != "true" ]; then
+            echo "::error::$TAG has no draft release."
+            exit 1
+          fi
+          V="${TAG#v}"
+          mkdir installers
+          for f in "Launcher_${V}_x64-setup.exe" "Launcher_${V}_x64_en-US.msi" \
+                   "Launcher_${V}_arm64-setup.exe" "Launcher_${V}_arm64_en-US.msi"; do
+            gh release download "$TAG" -p "$f" -D installers
+          done
+          (cd installers && sha256sum -- *)
+
+      - name: Hand them on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: draft-installers
+          path: installers/
+          if-no-files-found: error
+
+  test:
+    needs: fetch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-latest, arch: x64, kind: setup }
+          - { platform: windows-latest, arch: x64, kind: msi }
+          - { platform: windows-11-arm, arch: arm64, kind: setup }
+          - { platform: windows-11-arm, arch: arm64, kind: msi }
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Get the installers
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: draft-installers
+          path: installers
+
+      - name: Install, check, start and uninstall
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag }}
+          SIGNER: ${{ inputs.signer }}
+          TRUST_CERT: ${{ inputs.trust_cert }}
+          ARCH: ${{ matrix.arch }}
+          KIND: ${{ matrix.kind }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $V = $env:TAG.TrimStart('v')
+          $failures = New-Object System.Collections.Generic.List[string]
+          function Fail($m) { Write-Host "::error::$m"; $failures.Add($m) }
+          $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host "Runner: $($env:ARCH), elevated: $admin"
+
+          # A release passes no test certificate: Windows must trust the real chain by
+          # itself, and every signature must be Valid. A dry run passes its test root;
+          # where the runner can't trust it (not elevated), a signature must still be
+          # intact, by the right signer and timestamped, but can't be Valid.
+          $trusted = -not $env:TRUST_CERT
+          if ($env:TRUST_CERT) {
+            $path = Join-Path $env:RUNNER_TEMP 'test-root.cer'
+            Set-Content -Path $path -Value ([Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($env:TRUST_CERT))) -Encoding Ascii
+            try {
+              Import-Certificate -FilePath $path -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+              $trusted = $true
+              Write-Host "Dry run: trusting the test root."
+            } catch { Write-Host "Dry run: can't trust the test root here ($($_.Exception.Message)); checking signatures without trust." }
+          }
+
+          function Check-Signature($file, $label) {
+            $s = Get-AuthenticodeSignature -FilePath $file
+            $cn = if ($s.SignerCertificate) { $s.SignerCertificate.GetNameInfo('SimpleName', $false) } else { '' }
+            Write-Host ("{0}: status {1}, signer '{2}', timestamped {3}" -f $label, $s.Status, $cn, [bool]$s.TimeStamperCertificate)
+            if ($trusted) {
+              if ($s.Status -ne 'Valid') { Fail "$label signature status is $($s.Status): $($s.StatusMessage)" }
+            } elseif ($s.Status -in 'NotSigned', 'HashMismatch', 'NotSupportedFileFormat', 'Incompatible') {
+              Fail "$label signature status is $($s.Status): $($s.StatusMessage)"
+            }
+            if ($cn -ne $env:SIGNER) { Fail "$label is signed by '$cn', expected '$($env:SIGNER)'" }
+            if (-not $s.TimeStamperCertificate) { Fail "$label signature has no timestamp" }
+          }
+
+          function Smoke-Start($exe, $label) {
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds 15
+            if ($p.HasExited) { Fail "$label exited within 15 s (exit code $($p.ExitCode))" }
+            else { Write-Host "$label is running after 15 s"; Stop-Process -Id $p.Id -Force }
+            Start-Sleep -Seconds 2
+          }
+
+          function Find-Installed {
+            Get-ChildItem -Path "$env:LOCALAPPDATA\Launcher", "$env:ProgramFiles\Launcher", "${env:ProgramFiles(x86)}\Launcher" `
+              -Filter Launcher.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          $inside = Join-Path $env:RUNNER_TEMP 'inside'
+          if ($env:KIND -eq 'setup') {
+            $setup = Resolve-Path "installers/Launcher_${V}_$($env:ARCH)-setup.exe"
+            Check-Signature $setup 'setup.exe'
+            7z x -y "-o$inside" $setup Launcher.exe | Out-Null
+            $p = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Fail "setup.exe /S exited with $($p.ExitCode)" }
+            $installed = Find-Installed
+            if (-not $installed) { Fail "setup.exe: no installed Launcher.exe found" }
+            else {
+              Write-Host "setup.exe installed $($installed.FullName)"
+              Check-Signature $installed.FullName 'Launcher.exe from setup.exe'
+              if ((Get-FileHash $installed.FullName).Hash -ne (Get-FileHash "$inside\Launcher.exe").Hash) { Fail "installed Launcher.exe differs from the one inside setup.exe" }
+              Smoke-Start $installed.FullName 'Launcher.exe from setup.exe'
+              $un = Join-Path $installed.DirectoryName 'uninstall.exe'
+              if (Test-Path $un) {
+                Write-Host "uninstall.exe signature status: $((Get-AuthenticodeSignature -FilePath $un).Status) (expected NotSigned: it is built inside CI's makensis run, RELEASING.md)"
+                Start-Process -FilePath $un -ArgumentList '/S' -Wait | Out-Null
+                Start-Sleep -Seconds 5
+                if (Test-Path $installed.FullName) { Fail "the uninstaller left $($installed.FullName) behind" } else { Write-Host "setup.exe uninstalled" }
+              } else { Fail "no uninstall.exe beside the installed Launcher.exe" }
+            }
+          } else {
+            $msi = Resolve-Path "installers/Launcher_${V}_$($env:ARCH)_en-US.msi"
+            Check-Signature $msi 'MSI'
+            # 7-Zip names the files inside an MSI by their WiX ids; the main binary is "Path".
+            7z x -y "-o$inside" $msi Path | Out-Null
+            $log = Join-Path $env:RUNNER_TEMP 'msi-install.log'
+            $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/l*v', "`"$log`"" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Fail "msiexec /i exited with $($p.ExitCode)"; Get-Content $log -Tail 40 }
+            $installed = Find-Installed
+            if (-not $installed) { Fail "MSI: no installed Launcher.exe found" }
+            else {
+              Write-Host "MSI installed $($installed.FullName)"
+              Check-Signature $installed.FullName 'Launcher.exe from the MSI'
+              if ((Get-FileHash $installed.FullName).Hash -ne (Get-FileHash "$inside\Path").Hash) { Fail "installed Launcher.exe differs from the one inside the MSI" }
+              Smoke-Start $installed.FullName 'Launcher.exe from the MSI'
+              $p = Start-Process msiexec.exe -ArgumentList '/x', "`"$msi`"", '/qn' -Wait -PassThru
+              if ($p.ExitCode -ne 0) { Fail "msiexec /x exited with $($p.ExitCode)" }
+              if (Test-Path $installed.FullName) { Fail "the MSI uninstall left $($installed.FullName) behind" } else { Write-Host "MSI uninstalled" }
+            }
+          }
+
+          if ($failures.Count) { Write-Host "$($failures.Count) check(s) failed"; exit 1 }
+          Write-Host "All checks passed: $($env:ARCH) $($env:KIND)$(if (-not $trusted) { ' (signatures intact, not checked for trust)' })."
