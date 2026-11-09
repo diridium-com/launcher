@@ -23,8 +23,11 @@ REPO=${3:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}
 BUILD="Build on every push and every pull-request"
 INSTALLERS="Windows installers from the signed exes"
 
-tag_sha=$(gh api "repos/$REPO/commits/$TAG" --jq .sha) \
-  || { echo "can't find tag $TAG in $REPO" >&2; exit 1; }
+[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "$TAG is not a vX.Y.Z tag" >&2; exit 1; }
+# refs/tags/ only: commits/<name> would also resolve a branch of that name.
+gh api "repos/$REPO/git/ref/tags/$TAG" --silent || { echo "$REPO has no tag $TAG" >&2; exit 1; }
+tag_sha=$(gh api "repos/$REPO/commits/refs/tags/$TAG" --jq .sha) \
+  || { echo "can't resolve tag $TAG in $REPO" >&2; exit 1; }
 run=$(gh run view "$RUN" -R "$REPO" --json workflowName,event,headBranch,headSha,status,conclusion \
   -q '[.workflowName, .event, .headBranch, .headSha, .status, .conclusion] | join("\t")')
 IFS=$'\t' read -r workflow event ref sha status conclusion <<< "$run"

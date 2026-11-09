@@ -241,5 +241,10 @@ jobs:
           if ($env:TRUST_CERT) { $dry += 'a test root was trusted' }
           if ($env:SIGNER -ne 'Diridium Technologies, Inc.') { $dry += "signer '$($env:SIGNER)'" }
           if (-not $trusted) { $dry += 'signatures intact, not checked for trust' }
-          if ($dry) { Write-Host "All checks passed: $($env:ARCH) $($env:KIND), DRY RUN ($($dry -join '; '))." }
-          else { Write-Host "All checks passed: $($env:ARCH) $($env:KIND)." }
+          if ($dry) {
+            # An annotation, so the run's summary page says so, not only its log.
+            Write-Host "::warning::DRY RUN ($($dry -join '; ')): not the release's own test."
+            Write-Host "All checks passed: $($env:ARCH) $($env:KIND), DRY RUN ($($dry -join '; '))."
+          } else {
+            Write-Host "All checks passed: $($env:ARCH) $($env:KIND)."
+          }

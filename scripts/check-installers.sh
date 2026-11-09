@@ -16,7 +16,18 @@ set -euo pipefail
 [ "$#" -eq 2 ] || { sed -n '2,14p' "$0"; exit 1; }
 command -v 7z > /dev/null || { echo "7z is not installed" >&2; exit 1; }
 # Write one entry of a zip file to stdout.
-unzip_entry() { python3 -I -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$1" "$2"; }
+# Python ignores SIGPIPE, so a reader that cmp stopped exits 141 here too, like 7z.
+unzip_entry() {
+  python3 -I -c '
+import sys, zipfile
+data = zipfile.ZipFile(sys.argv[1]).read(sys.argv[2])
+try:
+    sys.stdout.buffer.write(data)
+    sys.stdout.flush()
+except BrokenPipeError:
+    sys.exit(141)
+' "$1" "$2"
+}
 fail=0
 found=0
 declare -A have=()
@@ -55,11 +66,11 @@ while IFS= read -r -d '' inst; do
 done < <(find "$1" -type f \( -name '*-setup.exe' -o -name '*_en-US.msi' -o -name '*.msix' \) -print0 | sort -z)
 rm -f -- "$err"
 [ "$found" -gt 0 ] || { echo "no installers found in $1" >&2; exit 1; }
-# Every architecture present needs all three: a missing package is a failure, not a smaller count.
+# A release has all three for both architectures: a missing package is a failure, not a smaller count.
 for a in x64 arm64; do
   n=0
   for k in -setup.exe _en-US.msi .msix; do [ -n "${have["$a $k"]:-}" ] && n=$((n + 1)); done
-  if [ "$n" -ne 0 ] && [ "$n" -ne 3 ]; then echo "FAIL $a: $n of the 3 (setup.exe, MSI, MSIX) found"; fail=1; fi
+  if [ "$n" -ne 3 ]; then echo "FAIL $a: $n of the 3 (setup.exe, MSI, MSIX) found"; fail=1; fi
 done
 [ "$fail" -eq 0 ] || exit 1
 echo "all $found installers and packages contain their signed exe"

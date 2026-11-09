@@ -32,8 +32,9 @@ print(a.getsockname()[1], b.getsockname()[1])')
 
 # The shipped lines carry trailing spaces, so match any whitespace and check each took.
 set_prop() {  # $1 key, $2 value
-  local key=${1//./\\.}
-  sed -i -E "s/^${key}[[:space:]]*=.*\$/$1 = $2/" "$P"
+  local key=${1//./\\.} value=$2
+  value=${value//\\/\\\\}; value=${value//&/\\&}; value=${value//\//\\/}  # sed replacement specials
+  sed -i -E "s/^${key}[[:space:]]*=.*\$/$1 = $value/" "$P"
   grep -qxF "$1 = $2" "$P" || { echo "could not set $1 in $P" >&2; exit 1; }
 }
 set_prop https.port "$HTTPS"

@@ -44,6 +44,12 @@ jobs:
             echo "::error::Not a release tag: $TAG"
             exit 1
           fi
+          # The workflow file, the scripts the bundle job checks out and the draft must all
+          # be the same tag's: dispatch with --ref <tag> -f tag=<tag>.
+          if [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::Dispatched on $GITHUB_REF, not refs/tags/$TAG. Run it with --ref $TAG."
+            exit 1
+          fi
           if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != "true" ]; then
             echo "::error::$TAG has no draft release."
             exit 1
