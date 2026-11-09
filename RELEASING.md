@@ -3,9 +3,12 @@
 Releases are cut by pushing a version tag. The CI workflow
 (`.github/workflows/build-launcher.yml`) builds all platforms on every push, with
 a read-only token. Only when a `v*` tag is pushed does a separate `release` job,
-the only one that can write, create a **draft** GitHub release from the checked
-build files. Merging to `master` does not release. The Windows files are signed
-before the draft is published (steps 6 to 9, and "Windows signing" below).
+the only job in that workflow that can write, create a **draft** GitHub release
+from the checked build files. Merging to `master` does not release. The Windows
+files are signed before the draft is published (steps 6 to 9, and "Windows
+signing" below). The two Windows workflows run by hand in those steps each have
+one job that can write, because only such a token sees a draft; it only downloads
+the draft's files and builds nothing.
 
 ## Steps
 
@@ -34,9 +37,11 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
    ```
 
    It compares the latest `v*` tag with `HEAD`: npm packages, Rust crates,
-   pinned GitHub actions and the CI Node version. It exits non-zero when
-   anything is too young or couldn't be checked, and prints the date from which
-   everything is old enough.
+   pinned GitHub actions (dated by their GitHub release), the CI Node and Rust
+   versions, jsign and the NuGet build tools. The NSIS and WiX the Tauri CLI
+   downloads come with the CLI's version, which the npm check covers. It exits
+   non-zero when anything is too young or couldn't be checked, and prints the
+   date from which everything is old enough.
 
 4. **Tag the merged commit and push the tag:**
 
@@ -60,27 +65,31 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
 
 6. **Sign the `Launcher.exe` copies and the uninstallers.** In the owner's
    remotekey session, from the repo root, with `yubikey-pkcs11.cfg` and
-   `certchain.pem` linked in (both gitignored) and `JSIGN_JAR` pointing at a
-   jsign jar with a `.sha256` beside it:
+   `certchain.pem` linked in (both gitignored) and `JSIGN_JAR` pointing at the
+   jsign 7.6 jar (the script checks its SHA-256):
 
    ```
    RUN=<run id of the tag's build>
-   scripts/ci-hashes.sh "$RUN" > sign-inputs.sha256
+   scripts/ci-hashes.sh "$RUN" vX.Y.Z > sign-inputs.sha256
    gh run download "$RUN" -p 'sign-inputs-*' -D sign-inputs
    scripts/sign-windows.sh sign-inputs.sha256 signed-exes sign-inputs/*/*.exe
    gh release upload vX.Y.Z signed-exes/*.exe
    ```
 
+   `ci-hashes.sh` refuses a run that isn't the tag's successful build. Then
    `sign-windows.sh` signs nothing unless every file's SHA-256 matches the run's
-   log, asks for the PIN once, and then checks each signed copy: it verifies,
-   carries a DigiCert timestamp and SSL.com's intermediate, is signed by
-   Diridium Technologies, Inc., and is the original plus a signature and nothing
-   else. The six files stay in the draft only until step 8.
+   log, asks for the PIN once, and checks each signed copy: it verifies, carries
+   a DigiCert timestamp, is signed by Diridium Technologies, Inc. through
+   SSL.com's intermediate, and is the original plus a signature and nothing
+   else. It works in `signed-exes.partial` and renames it to `signed-exes` only
+   when every check passes, so after a failure the upload line finds nothing;
+   pick a new folder name for the next attempt. The six files stay in the draft
+   only until step 8.
 
 7. **Build the Windows installers and MSIX packages from the signed files:**
 
    ```
-   gh workflow run windows-installers.yml -f tag=vX.Y.Z
+   gh workflow run windows-installers.yml --ref vX.Y.Z -f tag=vX.Y.Z
    ```
 
    It builds each installer with `tauri bundle --no-binary-patching`, so the
@@ -88,13 +97,14 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
    uninstaller replaces the one it built, which is accepted only if the signed
    copy is that uninstaller plus a signature. `scripts/pack-msix.ps1` packs the
    MSIX around the signed NSIS-marked exe. The workflow checks the signed files
-   inside each result and uploads all six as `windows-installers-*`.
+   inside each result and uploads all six as `windows-installers-*`. `--ref`
+   runs the tag's own copy of the workflow, matching the scripts it checks out.
 
 8. **Sign the installers and packages**, in a remotekey session as in step 6:
 
    ```
    RUN2=<run id of windows-installers.yml>
-   scripts/ci-hashes.sh "$RUN2" > installers.sha256
+   scripts/ci-hashes.sh "$RUN2" vX.Y.Z > installers.sha256
    gh run download "$RUN2" -p 'windows-installers-*' -D installers
    scripts/check-installers.sh installers signed-exes
    scripts/sign-windows.sh installers.sha256 signed-installers installers/*/*
@@ -115,11 +125,12 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
 9. **Test the draft's Windows installers:**
 
    ```
-   gh workflow run test-windows-installers.yml -f tag=vX.Y.Z
+   gh workflow run test-windows-installers.yml --ref vX.Y.Z -f tag=vX.Y.Z
    ```
 
-   On a fresh runner for each architecture and file type (setup.exe, MSI,
-   MSIX), it checks the file's signature, installs it silently, checks the
+   It first checks the draft holds exactly the 14 release files. Then, on a
+   fresh runner for each architecture and file type (setup.exe, MSI, MSIX), it
+   checks the file's signature, installs it silently, checks the
    installed `Launcher.exe` (and setup.exe's `uninstall.exe`) is signed and
    identical to the one inside it, starts it, and uninstalls. Every signature
    must be Valid on a stock Windows.
@@ -136,16 +147,20 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
   release's files are never replaced.
 - A draft that's wrong can be thrown away while it's unpublished, because nobody
   has it yet: delete the draft and the tag, fix, and tag the same version again.
+  The workflow artifacts that hold signed files are kept for one day, so they
+  don't keep a thrown-away build downloadable.
   Only the repository owner can create, move or delete `v*` tags. A clone that
   already fetched the old tag needs `git fetch --tags --force`.
 
 ## Windows signing
 
 - Every file a release ships is built by GitHub Actions from the tag. Signing
-  adds an Authenticode signature to what CI built and changes nothing else, and
-  `scripts/compare-signed.py` checks exactly that for every signed file. The key
-  is a hardware key on the owner's machine, used over a forwarded session for
-  the length of a signing step. It is never in CI, and no build runs where it is.
+  adds an Authenticode signature to what CI built and changes nothing else.
+  `scripts/compare-signed.py` checks that for every signed file: byte for byte
+  for the exes, and by content for the MSI (every stream) and the MSIX (every
+  entry and content type). The key is a hardware key on the owner's machine,
+  forwarded into the dev VM for the length of a signing step. It is never in CI;
+  the signing steps build nothing, and every signature needs the PIN.
 - Why two CI runs: Tauri writes the installer type into `Launcher.exe` while it
   builds each installer (tauri-bundler, `bundle.rs`, `patch_binary`), so the exe
   must be signed after that mark and before the installer is built around it.
@@ -168,11 +183,15 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
   SHA-512. The manifest is `src-tauri/msix/AppxManifest.xml`. Its Publisher
   must match the signing certificate's subject, so a dry run with a test
   certificate passes that subject as `msix_publisher`.
-- jsign follows the same 14-day rule as every other dependency.
+- jsign is pinned by version and SHA-256 in `scripts/sign-windows.sh`, and
+  `scripts/dependency-ages.py` checks its age like any other dependency.
 - Re-running the tag's build after step 6 refuses to refill the draft while
   signed Windows files from the earlier run are in it. Delete them and sign the
   new run's files again.
 - macOS and Linux files are not signed. Their SHA-256s are on the release page.
+- The signing steps' working folders (`sign-inputs/`, `signed-exes/`,
+  `installers/`, `signed-installers/`, the `.partial` folders and the two
+  `.sha256` lists) are gitignored.
 
 ## Upgrade test
 
@@ -181,7 +200,9 @@ diridium-com/launcher on fresh x64 and ARM64 Windows runners, then the build's
 own installer over it. Upgrading with the same installer type (setup.exe over
 setup.exe, MSI over MSI) must leave one Launcher at the new version and
 publisher, the saved connections untouched, and the app starting, or the build
-fails. Switching types is only reported, as warnings: Tauri's MSI never removes
-a setup.exe install, and setup.exe only removes an MSI install from the same
-publisher, so either way both versions stay installed. Release notes tell users
-to upgrade with the type they installed, or uninstall first to switch.
+fails. Switching types may leave both versions installed, which is reported as
+warnings: Tauri's MSI never removes a setup.exe install, and setup.exe removes
+an MSI install only from the same publisher, after a dialog the test can't
+answer. Apart from that dialog, a switch must still install the new version and
+start it, with the connections untouched, or the build fails. Release notes tell
+users to upgrade with the type they installed, or uninstall first to switch.

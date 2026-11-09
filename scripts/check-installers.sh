@@ -19,8 +19,13 @@ command -v 7z > /dev/null || { echo "7z is not installed" >&2; exit 1; }
 unzip_entry() { python3 -I -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$1" "$2"; }
 fail=0
 found=0
+declare -A have=()
+err=$(mktemp)
 while IFS= read -r -d '' inst; do
   name=$(basename "$inst")
+  if [[ $name =~ _(x64|arm64)(-setup\.exe|_en-US\.msi|\.msix)$ ]]; then
+    have["${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"]=1
+  fi
   case "$name" in
     *-setup.exe) exe="${name%-setup.exe}-nsis.exe"; inside=Launcher.exe ;;
     *_en-US.msi) exe="${name%_en-US.msi}-msi.exe"; inside=Path ;;
@@ -28,18 +33,33 @@ while IFS= read -r -d '' inst; do
     *) continue ;;
   esac
   found=$((found + 1))
-  signed=$(find "$2" -type f -name "$exe" -print -quit)
+  # Only the top level: sign-windows.sh keeps the unsigned CI copies under ci-originals/.
+  signed=$(find "$2" -maxdepth 1 -type f -name "$exe" -print -quit)
   if [ -z "$signed" ]; then echo "FAIL $name: no $exe in $2"; fail=1; continue; fi
   case "$name" in
     *.msix) extract=(unzip_entry "$inst" "$inside") ;;
     *) extract=(7z e -so "$inst" "$inside") ;;
   esac
-  if "${extract[@]}" 2> /dev/null | cmp -s - "$signed"; then
+  set +e
+  "${extract[@]}" 2> "$err" | cmp -s - "$signed"
+  st=("${PIPESTATUS[@]}")
+  set -e
+  if [ "${st[0]}" -eq 0 ] && [ "${st[1]}" -eq 0 ]; then
     echo "ok   $name contains $exe"
+  elif [ "${st[0]}" -ne 0 ] && [ "${st[0]}" -ne 141 ]; then
+    # 141 is the reader stopping because cmp already found a difference.
+    echo "FAIL $name: could not read $inside from it: $(tr '\n' ' ' < "$err")"; fail=1
   else
     echo "FAIL $name: its Launcher.exe is not $exe"; fail=1
   fi
 done < <(find "$1" -type f \( -name '*-setup.exe' -o -name '*_en-US.msi' -o -name '*.msix' \) -print0 | sort -z)
+rm -f -- "$err"
 [ "$found" -gt 0 ] || { echo "no installers found in $1" >&2; exit 1; }
+# Every architecture present needs all three: a missing package is a failure, not a smaller count.
+for a in x64 arm64; do
+  n=0
+  for k in -setup.exe _en-US.msi .msix; do [ -n "${have["$a $k"]:-}" ] && n=$((n + 1)); done
+  if [ "$n" -ne 0 ] && [ "$n" -ne 3 ]; then echo "FAIL $a: $n of the 3 (setup.exe, MSI, MSIX) found"; fail=1; fi
+done
 [ "$fail" -eq 0 ] || exit 1
 echo "all $found installers and packages contain their signed exe"

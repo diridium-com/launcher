@@ -40,10 +40,10 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          case "$TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::Not a release tag: $TAG"; exit 1 ;;
-          esac
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a release tag: $TAG"
+            exit 1
+          fi
           if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != "true" ]; then
             echo "::error::$TAG has no draft release."
             exit 1
@@ -59,11 +59,14 @@ jobs:
           (cd signed && sha256sum -- *)
 
       - name: Hand them on
+        # Signed files: kept one day, not the default 90, so a draft that is thrown
+        # away doesn't leave its signed files downloadable here (RELEASING.md).
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-exes
           path: signed/
           if-no-files-found: error
+          retention-days: 1
 
   # Read-only. Builds each installer from its signed exe and nothing else: the exe
   # is put where `tauri build` leaves it, and --no-binary-patching makes the bundler
@@ -86,20 +89,21 @@ jobs:
       - name: Checkout the tag
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
 
       - name: Rust setup
-        # The Tauri CLI reads the Cargo project; nothing is compiled. Same pin as
+        # The Tauri CLI reads the Cargo project; nothing is compiled. Same pins as
         # build-launcher.yml.
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # stable, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: 1.99.1
 
       - name: Node setup
         # Same pin as build-launcher.yml, for the same reason.
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.1
           cache: "npm"
 
       - name: Install the Tauri CLI from the lockfile
@@ -115,11 +119,12 @@ jobs:
         shell: bash
         env:
           A: ${{ matrix.arch }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           V="$(python -c 'import json; print(json.load(open("package.json"))["version"])')"
-          if [ "v$V" != "${{ inputs.tag }}" ]; then
-            echo "::error::The tag says ${{ inputs.tag }}, package.json says $V."
+          if [ "v$V" != "$TAG" ]; then
+            echo "::error::The tag says $TAG, package.json says $V."
             exit 1
           fi
           bin=src-tauri/target/release/Launcher.exe
@@ -168,8 +173,10 @@ jobs:
         run: (cd windows-installers && ls -l && sha256sum -- *)
 
       - name: Upload them for the second signing session
+        # They hold the signed exe and uninstaller: one day, like signed-exes.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installers-${{ matrix.arch }}
           path: windows-installers/
           if-no-files-found: error
+          retention-days: 1

@@ -53,8 +53,9 @@ if ($Publisher) {
 
 New-Item -ItemType Directory -Force $Out | Out-Null
 $file = Join-Path $Out "Launcher_$($Version)_$Arch.msix"
-& $mk pack /d $dir /p $file /o | Select-Object -Last 1
-if ($LASTEXITCODE -ne 0) { throw "makeappx failed: $LASTEXITCODE" }
+$packOutput = & $mk pack /d $dir /p $file /o 2>&1
+if ($LASTEXITCODE -ne 0) { $packOutput; throw "makeappx failed: $LASTEXITCODE" }
+$packOutput | Select-Object -Last 1
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($file)
