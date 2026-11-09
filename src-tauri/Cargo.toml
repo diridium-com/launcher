@@ -2,13 +2,19 @@
 name = "launcher"
 version = "2.4.1"
 description = "An Open Integration Engine Admin Client Launcher"
-authors = ["kiran@sereen.io"]
-homepage = "https://sereen.io"
+authors = ["Diridium Technologies, Inc. <helpdesk@diridium.com>"]
+homepage = "https://github.com/diridium-com/launcher"
 license = "MPL-2.0"
-repository = "https://github.com/kayyagari/ballista"
+repository = "https://github.com/diridium-com/launcher"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# Windows version details Tauri doesn't set. tauri-winres reads this section; AppLocker takes a
+# publisher rule's file name from OriginalFilename and refuses to make one without it.
+[package.metadata.tauri-winres]
+OriginalFilename = "Launcher.exe"
+InternalName = "Launcher"
 
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
