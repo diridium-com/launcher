@@ -10,9 +10,19 @@ the publish date of every version that is new at the second ref:
   - npm packages in package-lock.json (registry.npmjs.org)
   - Rust crates in src-tauri/Cargo.lock (crates.io, one request a second as its
     crawler policy asks)
-  - GitHub actions pinned by commit SHA in .github/workflows (the commit's date;
-    set GH_TOKEN for a higher API rate limit)
+  - GitHub actions pinned by commit SHA in .github/workflows: the publish date of
+    the GitHub release named in the pin's comment (`@<sha> # v1.2.3`), after
+    checking the SHA is that tag's commit; without such a release, the commit's
+    date, with a warning (a committer can set that date). Set GH_TOKEN for a
+    higher API rate limit
   - exact node-version values in .github/workflows (nodejs.org's release index)
+  - exact Rust toolchain values in .github/workflows (static.rust-lang.org's
+    release manifest)
+  - jsign, pinned in scripts/sign-windows.sh (the jar's upload to Maven Central)
+  - Microsoft.Windows.SDK.BuildTools, pinned in scripts/pack-msix.ps1 (NuGet)
+
+Not covered: the NSIS and WiX that the Tauri CLI downloads; their versions are
+fixed by the CLI's own version, which the npm check covers.
 
 Read-only: git and HTTPS GETs, nothing else. Run from the repo root:
 
@@ -20,22 +30,27 @@ Read-only: git and HTTPS GETs, nothing else. Run from the repo root:
     python3 scripts/dependency-ages.py --since v2.4.0 --until master --at 2026-11-04
 
 Exit status: 0 when everything new is old enough, 1 when something is too young,
-2 when a lookup failed or a version couldn't be dated (never read as a pass).
+2 when a lookup failed or a version couldn't be dated, 3 when the refs can't be
+resolved. Anything but 0 is never read as a pass.
 """
 import argparse
 import datetime as dt
+import email.utils
+import gzip
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 UA = {"User-Agent": "launcher dependency-ages (github.com/diridium-com/launcher)"}
 SHA = re.compile(r"^[0-9a-f]{40}$")
+WARNINGS = []  # appended from worker threads; list.append is atomic in CPython
 
 
 def git(*args):
@@ -50,7 +65,16 @@ def show(ref, path):
 def get_json(url, headers=None):
     req = urllib.request.Request(url, headers={**UA, **(headers or {})})
     with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+        data = r.read()
+        if r.headers.get("Content-Encoding") == "gzip":
+            data = gzip.decompress(data)
+        return json.loads(data)
+
+
+def github(path):
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    return get_json(f"https://api.github.com/{path}", headers)
 
 
 def when(text):
@@ -98,16 +122,37 @@ def workflows(ref):
 
 
 def actions(ref):
+    """(repo, sha, tag named in the comment or "") for SHA pins; (repo, version, "") otherwise."""
     pinned, unpinned = set(), set()
     for text in workflows(ref):
-        for m in re.finditer(r"uses:\s*([^\s#]+)", text):
+        for m in re.finditer(r"uses:\s*([^\s#]+)[ \t]*(?:#[ \t]*([^\s,]+))?", text):
             use = m.group(1)
             if use.startswith("./") or "@" not in use:
                 continue
             name, version = use.rsplit("@", 1)
             repo = "/".join(name.split("/")[:2])
-            (pinned if SHA.match(version) else unpinned).add((repo, version))
+            tag = m.group(2) or ""
+            (pinned if SHA.match(version) else unpinned).add((repo, version, tag))
     return pinned, unpinned
+
+
+def rust_toolchains(ref):
+    exact, other = set(), set()
+    for text in workflows(ref):
+        for m in re.finditer(r"toolchain:\s*['\"]?([^'\"\s#]+)", text):
+            v = m.group(1)
+            (exact if re.fullmatch(r"\d+\.\d+\.\d+", v) else other).add(("rust", v))
+    return exact, other
+
+
+def jsign_versions(ref):
+    m = re.search(r"^JSIGN_VERSION=(\S+)$", show(ref, "scripts/sign-windows.sh") or "", re.M)
+    return ({("jsign", m.group(1))} if m else set()), set()
+
+
+def nuget_versions(ref):
+    m = re.search(r"/microsoft\.windows\.sdk\.buildtools/([0-9][0-9.]*)/", show(ref, "scripts/pack-msix.ps1") or "")
+    return ({("microsoft.windows.sdk.buildtools", m.group(1))} if m else set()), set()
 
 
 def node_versions(ref):
@@ -133,11 +178,41 @@ def crate_date(item):
 
 
 def action_date(item):
-    repo, sha = item
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    commit = get_json(f"https://api.github.com/repos/{repo}/commits/{sha}", headers)
-    return commit["commit"]["committer"]["date"]
+    repo, sha, tag = item
+    if tag:
+        try:
+            release = github(f"repos/{repo}/releases/tags/{urllib.parse.quote(tag)}")
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            release = None
+        if release:
+            tag_sha = github(f"repos/{repo}/commits/{urllib.parse.quote(tag)}")["sha"]
+            if tag_sha != sha:
+                raise ValueError(f"pinned {sha} is not {tag}, which is {tag_sha}")
+            return release["published_at"]
+    WARNINGS.append(f"action {repo} {sha}: no GitHub release for '{tag}', dated by its commit date")
+    return github(f"repos/{repo}/commits/{sha}")["commit"]["committer"]["date"]
+
+
+def rust_date(item):
+    url = f"https://static.rust-lang.org/dist/channel-rust-{item[1]}.toml"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=60) as r:
+        head = r.read(8192).decode("utf-8", "replace")
+    return re.search(r'^date = "([0-9-]+)"', head, re.M).group(1)
+
+
+def jsign_date(item):
+    v = item[1]
+    url = f"https://repo1.maven.org/maven2/net/jsign/jsign/{v}/jsign-{v}.jar"
+    req = urllib.request.Request(url, headers=UA, method="HEAD")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return email.utils.parsedate_to_datetime(r.headers["Last-Modified"]).isoformat()
+
+
+def nuget_date(item):
+    name, v = item
+    return get_json(f"https://api.nuget.org/v3/registration5-gz-semver2/{name}/{v}.json")["published"]
 
 
 def date_all(items, lookup, parallel=True):
@@ -167,7 +242,8 @@ def main():
 
     since = a.since or (git("describe", "--tags", "--abbrev=0", "--match", "v*", a.until) or "").strip()
     if not since or git("rev-parse", "--verify", "--quiet", since) is None:
-        sys.exit(f"cannot resolve the last release ref ({since or 'no v* tag found'}); pass --since")
+        print(f"cannot resolve the last release ref ({since or 'no v* tag found'}); pass --since", file=sys.stderr)
+        sys.exit(3)
     at = (dt.datetime.strptime(a.at, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
           if a.at else dt.datetime.now(dt.timezone.utc))
     print(f"New since {since} at {a.until}, judged at {at:%Y-%m-%d %H:%M} UTC, minimum {a.days} days")
@@ -175,12 +251,14 @@ def main():
     young, errors, unchecked, newest = [], [], [], None
     node_index = None
     kinds = [("npm", npm_packages, npm_date, True), ("crate", crates, crate_date, False),
-             ("action", actions, action_date, True), ("node", node_versions, None, True)]
+             ("action", actions, action_date, True), ("node", node_versions, None, True),
+             ("rust", rust_toolchains, rust_date, True), ("jsign", jsign_versions, jsign_date, True),
+             ("nuget", nuget_versions, nuget_date, True)]
     for kind, pins, lookup, parallel in kinds:
         old_ok, old_other = pins(since)
         new_ok, new_other = pins(a.until)
         new = sorted(new_ok - old_ok)
-        unchecked += [f"{kind} {n} {v}" for n, v in sorted(new_other - old_other)]
+        unchecked += [f"{kind} {i[0]} {i[1]}" for i in sorted(new_other - old_other)]
         if kind == "node":
             if new and node_index is None:
                 try:
@@ -198,7 +276,11 @@ def main():
             if str(d).startswith("ERROR"):
                 errors.append(f"{label}: {d}")
                 continue
-            published = when(d) if "T" in d else dt.datetime.fromisoformat(d).replace(tzinfo=dt.timezone.utc)
+            try:
+                published = when(d) if "T" in d else dt.datetime.fromisoformat(d).replace(tzinfo=dt.timezone.utc)
+            except (TypeError, ValueError) as e:
+                errors.append(f"{label}: can't read the date {d!r} ({e})")
+                continue
             newest = max(newest, published) if newest else published
             age = (at - published).total_seconds() / 86400
             if age < a.days:
@@ -208,6 +290,8 @@ def main():
         print(f"  TOO YOUNG  {published:%Y-%m-%d}  {age:5.1f} days  {label}")
     for line in unchecked:
         print(f"  UNCHECKED  {line} (not from a registry, or not an exact version)")
+    for line in sorted(WARNINGS):
+        print(f"  WARNING    {line}")
     for line in errors:
         print(f"  ERROR      {line}")
     if newest:

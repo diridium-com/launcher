@@ -27,6 +27,8 @@ jobs:
       - name: Checkout repository
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Refuse a tag whose release is already published
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -111,6 +113,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Install dependencies (ubuntu only)
         if: startsWith(matrix.platform, 'ubuntu')
@@ -119,16 +123,20 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: Rust setup
-        # Pinned to the stable branch as of 2026-10-09, its newest commit at least
-        # 14 days old on 2026-10-23. Pinned by commit, the action can't read the
-        # toolchain from the ref name, so it is named below.
+        # The action is pinned to its stable branch as of 2026-10-09, its newest commit
+        # at least 14 days old on 2026-10-23. The toolchain is pinned exactly, because
+        # its standard library ships inside Launcher: 1.99.1 (released 2026-10-15).
+        # scripts/dependency-ages.py checks its age; windows-installers.yml uses the same.
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # stable, 2026-10-09
         with:
-          toolchain: stable
+          toolchain: 1.99.1
           targets: ${{ matrix.rust-targets }}
           components: clippy
 
       - name: Rust cache
+        # Not on tag builds: a release builds from nothing, not from a cache another
+        # run wrote.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "./src-tauri -> target"
@@ -155,12 +163,10 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Pinned exactly, so every runner uses the same Node instead of whatever
-          # 24.x its image carries. 24.21.0 (2026-09-07) is the newest 24.x at
-          # least 14 days old. 24.22.1 (2026-10-20) fixes CVE-2026-111497
-          # (Node2Shell), but Node here only builds and never ships in the app,
-          # so it waits the 14 days like any build-only tool: move to 24.22.1 on
-          # or after 2026-11-03.
-          node-version: 24.21.0
+          # 24.x its image carries. 24.22.1 (2026-10-20, the CVE-2026-111497
+          # Node2Shell fix) was the newest 24.x at least 14 days old on 2026-11-09.
+          # Node here only builds and never ships in the app.
+          node-version: 24.22.1
           cache: "npm"
 
       - name: Install frontend dependencies
@@ -171,6 +177,11 @@ jobs:
         # only) have one. Without its script esbuild runs through its JavaScript
         # launcher; on Linux that built the same frontend (checked 2026-10-23).
         run: npm ci --ignore-scripts
+
+      - name: Lint the frontend (ubuntu only)
+        # oxlint with .oxlintrc.json; any warning fails the build.
+        if: matrix.platform == 'ubuntu-latest'
+        run: npm run lint
 
       - name: npm security audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
@@ -340,6 +351,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Download the builds' files
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -391,6 +404,11 @@ jobs:
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [guard, collect, upgrade]
+    # One release job per tag at a time, so two overlapping runs can't both find
+    # no draft and create two.
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -470,9 +488,11 @@ jobs:
   # exactly one Launcher in Windows' list of installed apps, at this version and
   # publisher, one Launcher.exe, the saved connections untouched
   # (%USERPROFILE%\.launcher\launcher-data.json), and the app starting. Switching
-  # types is reported as warnings only: Tauri's MSI never removes a setup.exe
-  # install, and setup.exe only removes an MSI install from the same publisher
-  # (measured 2026-11-07; RELEASING.md and the 2.4.1 release notes).
+  # types may leave two copies, reported as warnings only: Tauri's MSI never removes
+  # a setup.exe install, and setup.exe only removes an MSI install from the same
+  # publisher, after a dialog the test can't answer (measured 2026-11-07;
+  # RELEASING.md and the 2.4.1 release notes). Apart from that dialog, a switch must
+  # still install this version and start it, and the connections must be untouched.
   upgrade:
     needs: build
     strategy:
@@ -490,6 +510,7 @@ jobs:
         with:
           sparse-checkout: src-tauri/tauri.conf.json
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Get this run's installers
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -522,6 +543,7 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'upgrade-evidence'
           New-Item -ItemType Directory -Path $out | Out-Null
           $switching = $env:CASE -in 'msi-setupP', 'setup-msi'
+          $timedOut = $false
           $problems = New-Object System.Collections.Generic.List[string]
           function Fail($m) { if ($switching) { Write-Host "::warning::$m" } else { Write-Host "::error::$m" }; $problems.Add($m) }
           $publisher = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).bundle.publisher
@@ -572,6 +594,7 @@ jobs:
             Write-Host "----- ${label}: $file $arguments"
             $p = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
             if (-not $p.WaitForExit(300000)) {
+              $script:timedOut = $true
               Fail "$label did not finish within 5 minutes (waiting on a dialog?)"
               Screenshot ($label -replace '[^a-zA-Z0-9.-]', '_')
               Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
@@ -601,7 +624,11 @@ jobs:
             'setup-S'    { $c = Run 'install this setup.exe /S' $newSetup '/S'; break }
             default      { $c = Run 'install this MSI' 'msiexec.exe' @('/i', "`"$newMsi`"", '/qn', '/l*v', "`"$out\new-msi.log`""); break }
           }
-          if ($c -ne 0) { Fail "installing this run's installer returned $c" }
+          if ($c -ne 0) {
+            # Only setup.exe waiting on the old MSI's dialog is the known switching behaviour.
+            if ($switching -and $timedOut) { Fail "installing this run's installer returned $c" }
+            else { Write-Host "::error::installing this run's installer returned $c"; $problems.Add('install'); $switching = $false }
+          }
           Start-Sleep -Seconds 5
           State 'after this run'
 
@@ -614,7 +641,11 @@ jobs:
           }
           if ($exes.Count -ne 1) { Fail "$($exes.Count) Launcher.exe files on disk, expected 1: $(($exes | ForEach-Object Path) -join ', ')" }
           foreach ($x in $exes) { if ((V3 $x.Version) -ne $newVersion) { Fail "$($x.Path) is version $($x.Version)" } }
-          # The saved connections and a starting app are required in every case.
+          # The saved connections and a starting app are required in every case, and a
+          # switch must have installed this version unless it stopped at the dialog.
+          if ($switching -and -not $timedOut -and -not ($exes | Where-Object { (V3 $_.Version) -eq $newVersion })) {
+            Write-Host "::error::no Launcher.exe at version $newVersion after this run's installer"; $problems.Add('new version'); $switching = $false
+          }
           if (-not (Test-Path $file)) { Write-Host "::error::the saved connections file is gone"; $problems.Add('connections'); $switching = $false }
           elseif ((Get-FileHash $file).Hash -ne $before) { Write-Host "::error::the saved connections file changed"; $problems.Add('connections'); $switching = $false }
           foreach ($x in $exes | Where-Object { (V3 $_.Version) -eq $newVersion }) {

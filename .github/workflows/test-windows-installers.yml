@@ -42,15 +42,29 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          case "$TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::Not a release tag: $TAG"; exit 1 ;;
-          esac
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not a release tag: $TAG"
+            exit 1
+          fi
           if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != "true" ]; then
             echo "::error::$TAG has no draft release."
             exit 1
           fi
           V="${TAG#v}"
+          # The draft must hold exactly the 14 release files: no file missing, and nothing
+          # left over from the first signing session (RELEASING.md, step 8).
+          printf '%s\n' \
+            "Launcher_${V}_universal.dmg" "Launcher_universal.app.tar.gz" \
+            "Launcher_${V}_x64-setup.exe" "Launcher_${V}_x64_en-US.msi" "Launcher_${V}_x64.msix" \
+            "Launcher_${V}_arm64-setup.exe" "Launcher_${V}_arm64_en-US.msi" "Launcher_${V}_arm64.msix" \
+            "Launcher_${V}_amd64.AppImage" "Launcher_${V}_amd64.deb" "Launcher-${V}-1.x86_64.rpm" \
+            "Launcher_${V}_aarch64.AppImage" "Launcher_${V}_arm64.deb" "Launcher-${V}-1.aarch64.rpm" \
+            | sort > "$RUNNER_TEMP/expected.txt"
+          gh release view "$TAG" --json assets -q '.assets[].name' | sort > "$RUNNER_TEMP/found.txt"
+          if ! diff "$RUNNER_TEMP/expected.txt" "$RUNNER_TEMP/found.txt"; then
+            echo "::error::The draft doesn't hold exactly the 14 release files (< expected, > found)."
+            exit 1
+          fi
           mkdir installers
           for f in "Launcher_${V}_x64-setup.exe" "Launcher_${V}_x64_en-US.msi" "Launcher_${V}_x64.msix" \
                    "Launcher_${V}_arm64-setup.exe" "Launcher_${V}_arm64_en-US.msi" "Launcher_${V}_arm64.msix"; do
@@ -59,11 +73,13 @@ jobs:
           (cd installers && sha256sum -- *)
 
       - name: Hand them on
+        # The signed release files: kept one day, not the default 90 (RELEASING.md).
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: draft-installers
           path: installers/
           if-no-files-found: error
+          retention-days: 1
 
   test:
     needs: fetch
@@ -219,4 +235,11 @@ jobs:
           }
 
           if ($failures.Count) { Write-Host "$($failures.Count) check(s) failed"; exit 1 }
-          Write-Host "All checks passed: $($env:ARCH) $($env:KIND)$(if (-not $trusted) { ' (signatures intact, not checked for trust)' })."
+          # A run with a test root or another signer is a dry run, and says so, so it can't be
+          # mistaken for the release's own test.
+          $dry = @()
+          if ($env:TRUST_CERT) { $dry += 'a test root was trusted' }
+          if ($env:SIGNER -ne 'Diridium Technologies, Inc.') { $dry += "signer '$($env:SIGNER)'" }
+          if (-not $trusted) { $dry += 'signatures intact, not checked for trust' }
+          if ($dry) { Write-Host "All checks passed: $($env:ARCH) $($env:KIND), DRY RUN ($($dry -join '; '))." }
+          else { Write-Host "All checks passed: $($env:ARCH) $($env:KIND)." }
