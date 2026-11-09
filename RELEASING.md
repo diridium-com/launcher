@@ -173,3 +173,15 @@ before the draft is published (steps 6 to 9, and "Windows signing" below).
   signed Windows files from the earlier run are in it. Delete them and sign the
   new run's files again.
 - macOS and Linux files are not signed. Their SHA-256s are on the release page.
+
+## Upgrade test
+
+Every build (`upgrade` job) installs the latest published release of
+diridium-com/launcher on fresh x64 and ARM64 Windows runners, then the build's
+own installer over it. Upgrading with the same installer type (setup.exe over
+setup.exe, MSI over MSI) must leave one Launcher at the new version and
+publisher, the saved connections untouched, and the app starting, or the build
+fails. Switching types is only reported, as warnings: Tauri's MSI never removes
+a setup.exe install, and setup.exe only removes an MSI install from the same
+publisher, so either way both versions stay installed. Release notes tell users
+to upgrade with the type they installed, or uninstall first to switch.
