@@ -2,15 +2,20 @@
 """Check that a signed Windows file is the unsigned file plus an Authenticode signature, and
 nothing else changed.
 
-Usage: compare-signed.py pe  <unsigned .exe> <signed .exe>
-       compare-signed.py msi <unsigned .msi> <signed .msi>
+Usage: compare-signed.py pe   <unsigned .exe> <signed .exe>
+       compare-signed.py msi  <unsigned .msi> <signed .msi>
+       compare-signed.py msix <unsigned .msix> <signed .msix>
 
-pe: Launcher.exe and the NSIS setup.exe. Signing sets the PE header checksum and the
+pe: Launcher.exe, the NSIS uninstaller and setup.exe. Signing sets the PE header checksum and the
 certificate table entry, pads the file with up to 7 zero bytes to an 8-byte boundary, and
 appends the certificate table. Every other byte must match.
 
 msi: signing adds the \\x05DigitalSignature stream (and \\x05MsiDigitalSignatureEx when
 present). Every other stream must exist in both files with identical contents. Needs olefile.
+
+msix: signing adds the AppxSignature.p7x entry and declares its content type in
+[Content_Types].xml. Every other entry must exist in both files with identical contents, and
+[Content_Types].xml may differ only by that one declaration.
 
 Exits 0 and prints one line when the files match that way; otherwise exits 1 and says where
 they differ. Used before a release's signed files replace the ones CI built (RELEASING.md).
@@ -97,10 +102,55 @@ def compare_msi(unsigned_path, signed_path):
           f"{signed_path} adds " + ", ".join(sorted(repr(n) for n in SIGNATURE_STREAMS & set(s))))
 
 
+MSIX_SIGNATURE = "AppxSignature.p7x"
+CONTENT_TYPES = "[Content_Types].xml"
+SIGNATURE_TYPE = ("Override", "/AppxSignature.p7x", "application/vnd.ms-appx.signature")
+
+
+def content_types(data):
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(data)
+    out = []
+    for e in root:
+        tag = e.tag.split("}")[-1]
+        out.append((tag, e.get("PartName") or e.get("Extension"), e.get("ContentType")))
+    return out
+
+
+def compare_msix(unsigned_path, signed_path):
+    import zipfile
+    with zipfile.ZipFile(unsigned_path) as uz, zipfile.ZipFile(signed_path) as sz:
+        u = {n: uz.read(n) for n in uz.namelist()}
+        s = {n: sz.read(n) for n in sz.namelist()}
+    if MSIX_SIGNATURE in u:
+        sys.exit(f"{unsigned_path} already carries {MSIX_SIGNATURE}")
+    if MSIX_SIGNATURE not in s:
+        sys.exit(f"{signed_path} has no {MSIX_SIGNATURE}: not signed")
+    problems = []
+    extra = set(s) - set(u) - {MSIX_SIGNATURE}
+    missing = set(u) - set(s)
+    changed = sorted(n for n in set(u) & set(s) if u[n] != s[n] and n != CONTENT_TYPES)
+    if extra:
+        problems.append("entries only in the signed file: " + ", ".join(sorted(extra)))
+    if missing:
+        problems.append("entries missing from the signed file: " + ", ".join(sorted(missing)))
+    if changed:
+        problems.append("entries that differ: " + ", ".join(changed))
+    ut, st = content_types(u[CONTENT_TYPES]), content_types(s[CONTENT_TYPES])
+    if st != ut + [SIGNATURE_TYPE]:
+        problems.append(f"{CONTENT_TYPES} differs by more than the signature's content type")
+    if problems:
+        sys.exit("; ".join(problems))
+    print(f"same apart from the signature: all {len(u)} entries of {unsigned_path} unchanged "
+          f"apart from the {MSIX_SIGNATURE} declaration in {CONTENT_TYPES}; {signed_path} adds {MSIX_SIGNATURE} "
+          f"({len(s[MSIX_SIGNATURE])} bytes)")
+
+
 def main():
-    if len(sys.argv) != 4 or sys.argv[1] not in ("pe", "msi"):
+    modes = {"pe": compare_pe, "msi": compare_msi, "msix": compare_msix}
+    if len(sys.argv) != 4 or sys.argv[1] not in modes:
         sys.exit(__doc__)
-    (compare_pe if sys.argv[1] == "pe" else compare_msi)(sys.argv[2], sys.argv[3])
+    modes[sys.argv[1]](sys.argv[2], sys.argv[3])
 
 
 if __name__ == "__main__":

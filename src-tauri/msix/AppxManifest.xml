@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The MSIX package's manifest. scripts/pack-msix.ps1 fills in the version and the architecture
+     (and, for dry runs with a test certificate only, replaces the Publisher). Microsoft's manifest
+     schema requires Publisher to match the signing certificate's subject as Windows writes it. -->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
+  <Identity Name="Diridium.Launcher"
+            Publisher="CN=&quot;Diridium Technologies, Inc.&quot;, OU=IT, O=&quot;Diridium Technologies, Inc.&quot;, L=Addison, S=Texas, C=US"
+            Version="@VERSION@.0" ProcessorArchitecture="@ARCH@" />
+  <Properties>
+    <DisplayName>Launcher</DisplayName>
+    <PublisherDisplayName>Diridium Technologies, Inc.</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="Launcher" Executable="Launcher.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Launcher" Description="An Open Integration Engine Admin Client Launcher"
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

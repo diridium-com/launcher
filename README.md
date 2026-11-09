@@ -49,24 +49,60 @@ runtime when it runs, so it fails the same way.
 
 WebView2 is the only thing the installer downloads, and Launcher has no auto-updater.
 
+### The MSIX package
+
+From 2.4.1 on, each release also has an MSIX package per architecture, for example
+`Launcher_2.4.1_x64.msix`. It installs for the current user without administrator rights. Double-click
+it to open App Installer, or in PowerShell:
+
+```
+Add-AppxPackage .\Launcher_2.4.1_x64.msix
+```
+
+The package can't install WebView2, so install WebView2 first where it is missing (see above). Windows
+Server 2022 has neither WebView2 nor App Installer out of the box: there the package installs with
+`Add-AppxPackage`, but Launcher doesn't open until WebView2 is installed. The package declares Windows
+10 version 1809 (build 17763) as its minimum, which is also Windows Server 2019; on anything older, use
+the `.exe` or the `.msi`.
+
+To install it for every user, run this in an administrator PowerShell. It installs for you at once,
+and for a new user at their first sign-in.
+
+```
+Add-AppxProvisionedPackage -Online -PackagePath .\Launcher_2.4.1_x64.msix -SkipLicense
+```
+
+Where sideloading is turned off by policy, Windows refuses the package with "Sideloading is blocked by
+policy. Contact your administrator to allow you to install apps from anywhere." Under AppLocker, the
+package is governed by packaged app rules, for installing and for starting it: allow the publisher
+Diridium Technologies, Inc. Executable rules don't apply to the `Launcher.exe` inside the package.
+
+Launcher from the package uses the same `.launcher` folder in your home folder as the other installers:
+connections, the downloaded administrator files and the logs. Its own settings, such as the theme, go
+into the package's private storage, which Windows deletes when the package is removed. The exception is
+a machine where the `.exe` or `.msi` has already run: then both use the settings that install made.
+Installed beside the `.exe` or `.msi`, the package is a second copy with its own Start menu entry,
+sharing those settings; uninstall the one you don't want. A newer package installs over an older one
+and keeps the settings.
+
 ### Checking a download
 
 Every release file is built by GitHub Actions from the release's tag in this repository, and its
 SHA-256 is listed on the release page.
 
-From 2.4.1 on, the Windows installers (`.exe` and `.msi`) and the `Launcher.exe` they install are
-signed by Diridium Technologies, Inc. To check one, open the file's Properties and its Digital
-Signatures tab, or in PowerShell:
+From 2.4.1 on, the Windows files (`.exe`, `.msi` and `.msix`), the `Launcher.exe` they install and the
+`.exe` installer's `uninstall.exe` are signed by Diridium Technologies, Inc. To check one, open the
+file's Properties and its Digital Signatures tab, or in PowerShell:
 
 ```
 Get-AuthenticodeSignature .\Launcher_2.4.1_x64-setup.exe
 ```
 
-The status should be `Valid` and the signer `Diridium Technologies, Inc.`. Two kinds of file the
-setup.exe writes are not signed: its `uninstall.exe`, and the helper DLLs it uses while it runs.
-AppLocker or WDAC rules can allow Launcher by publisher; allow `uninstall.exe` (and the helper DLLs,
-where DLL rules are on) by hash or path. The macOS and Linux files are not signed; check them against
-the SHA-256 on the release page.
+The status should be `Valid` and the signer `Diridium Technologies, Inc.`. The helper DLLs that the
+`.exe` installer and its `uninstall.exe` unpack into a temporary folder while they run are not signed.
+AppLocker or WDAC rules can allow Launcher by publisher; where DLL rules are on, allow the helper DLLs
+by hash or path. The macOS and Linux files are not signed; check them against the SHA-256 on the
+release page.
 
 ## How To Use
 

@@ -1,12 +1,13 @@
 name: Test the draft's Windows installers
 
-# Run by hand for a release (RELEASING.md), once the draft has its four signed
-# Windows installers. Each installer gets its own fresh runner (an MSI reuses the
-# folder an earlier NSIS install left in the registry, tauri-bundler main.wxs, so the
-# two must not share one): check its Authenticode signature, install it silently,
-# check the installed Launcher.exe is signed and identical to the one inside the
-# installer, start it and see it stay up, uninstall it. Tests the files users will
-# download, not a fresh build.
+# Run by hand for a release (RELEASING.md), once the draft has its six signed
+# Windows files: setup.exe, the MSI and the MSIX package per architecture. Each gets
+# its own fresh runner (an MSI reuses the folder an earlier NSIS install left in the
+# registry, tauri-bundler main.wxs, so the two must not share one): check its
+# Authenticode signature, install it silently, check the installed Launcher.exe (and
+# setup.exe's uninstall.exe) is signed and identical to the one inside it, start it
+# and see it stay up, uninstall it. Tests the files users will download, not a fresh
+# build.
 
 on:
   workflow_dispatch:
@@ -28,7 +29,7 @@ permissions:
 
 jobs:
   # The only job that can write, because only a token that can write sees a draft.
-  # It downloads the four installers and hands them on: no checkout, no build tools.
+  # It downloads the six files and hands them on: no checkout, no build tools.
   fetch:
     runs-on: ubuntu-latest
     permissions:
@@ -51,8 +52,8 @@ jobs:
           fi
           V="${TAG#v}"
           mkdir installers
-          for f in "Launcher_${V}_x64-setup.exe" "Launcher_${V}_x64_en-US.msi" \
-                   "Launcher_${V}_arm64-setup.exe" "Launcher_${V}_arm64_en-US.msi"; do
+          for f in "Launcher_${V}_x64-setup.exe" "Launcher_${V}_x64_en-US.msi" "Launcher_${V}_x64.msix" \
+                   "Launcher_${V}_arm64-setup.exe" "Launcher_${V}_arm64_en-US.msi" "Launcher_${V}_arm64.msix"; do
             gh release download "$TAG" -p "$f" -D installers
           done
           (cd installers && sha256sum -- *)
@@ -72,8 +73,10 @@ jobs:
         include:
           - { platform: windows-latest, arch: x64, kind: setup }
           - { platform: windows-latest, arch: x64, kind: msi }
+          - { platform: windows-latest, arch: x64, kind: msix }
           - { platform: windows-11-arm, arch: arm64, kind: setup }
           - { platform: windows-11-arm, arch: arm64, kind: msi }
+          - { platform: windows-11-arm, arch: arm64, kind: msix }
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Get the installers
@@ -143,7 +146,7 @@ jobs:
           if ($env:KIND -eq 'setup') {
             $setup = Resolve-Path "installers/Launcher_${V}_$($env:ARCH)-setup.exe"
             Check-Signature $setup 'setup.exe'
-            7z x -y "-o$inside" $setup Launcher.exe | Out-Null
+            7z x -y "-o$inside" $setup Launcher.exe uninstall.exe | Out-Null
             $p = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
             if ($p.ExitCode -ne 0) { Fail "setup.exe /S exited with $($p.ExitCode)" }
             $installed = Find-Installed
@@ -155,11 +158,44 @@ jobs:
               Smoke-Start $installed.FullName 'Launcher.exe from setup.exe'
               $un = Join-Path $installed.DirectoryName 'uninstall.exe'
               if (Test-Path $un) {
-                Write-Host "uninstall.exe signature status: $((Get-AuthenticodeSignature -FilePath $un).Status) (expected NotSigned: it is built inside CI's makensis run, RELEASING.md)"
+                Check-Signature $un 'uninstall.exe from setup.exe'
+                if ((Get-FileHash $un).Hash -ne (Get-FileHash "$inside\uninstall.exe").Hash) { Fail "installed uninstall.exe differs from the one inside setup.exe" }
                 Start-Process -FilePath $un -ArgumentList '/S' -Wait | Out-Null
                 Start-Sleep -Seconds 5
                 if (Test-Path $installed.FullName) { Fail "the uninstaller left $($installed.FullName) behind" } else { Write-Host "setup.exe uninstalled" }
               } else { Fail "no uninstall.exe beside the installed Launcher.exe" }
+            }
+          } elseif ($env:KIND -eq 'msix') {
+            $msix = (Resolve-Path "installers/Launcher_${V}_$($env:ARCH).msix").Path
+            Check-Signature $msix 'MSIX'
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            New-Item -ItemType Directory -Force $inside | Out-Null
+            $zip = [IO.Compression.ZipFile]::OpenRead($msix)
+            try { [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.GetEntry('Launcher.exe'), "$inside\Launcher.exe") } finally { $zip.Dispose() }
+            try { Add-AppxPackage -Path $msix } catch { Fail "Add-AppxPackage failed: $($_.Exception.Message)" }
+            $pkg = Get-AppxPackage -Name Diridium.Launcher
+            if (-not $pkg) { Fail "MSIX: Diridium.Launcher is not installed" }
+            else {
+              Write-Host "MSIX installed $($pkg.PackageFullName) at $($pkg.InstallLocation), signature kind $($pkg.SignatureKind)"
+              $exe = Join-Path $pkg.InstallLocation 'Launcher.exe'
+              Check-Signature $exe 'Launcher.exe from the MSIX'
+              if ((Get-FileHash $exe).Hash -ne (Get-FileHash "$inside\Launcher.exe").Hash) { Fail "installed Launcher.exe differs from the one inside the MSIX" }
+              # A packaged app starts through its app entry, as the Start menu does.
+              Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!Launcher"
+              $proc = $null
+              for ($i = 0; $i -lt 30 -and -not $proc; $i++) {
+                Start-Sleep -Seconds 2
+                $proc = Get-Process Launcher -ErrorAction SilentlyContinue | Where-Object Path -like "$($pkg.InstallLocation)\*" | Select-Object -First 1
+              }
+              if (-not $proc) { Fail "Launcher.exe from the MSIX did not start within 60 s" }
+              else {
+                Start-Sleep -Seconds 15
+                if ($proc.HasExited) { Fail "Launcher.exe from the MSIX exited within 15 s (exit code $($proc.ExitCode))" }
+                else { Write-Host "Launcher.exe from the MSIX is running after 15 s: $($proc.Path)"; Stop-Process -Id $proc.Id -Force }
+                Start-Sleep -Seconds 2
+              }
+              Remove-AppxPackage -Package $pkg.PackageFullName
+              if (Get-AppxPackage -Name Diridium.Launcher) { Fail "the MSIX is still installed after Remove-AppxPackage" } else { Write-Host "MSIX removed" }
             }
           } else {
             $msi = Resolve-Path "installers/Launcher_${V}_$($env:ARCH)_en-US.msi"

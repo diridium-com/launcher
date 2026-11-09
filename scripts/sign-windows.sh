@@ -5,7 +5,7 @@
 #
 #   <CI's SHA-256 list>  sha256sum-format lines printed by the CI run that built the files
 #   <new output folder>  must not exist; signed copies and their SHA256SUMS go here
-#   <file>...            .exe or .msi files downloaded from that run
+#   <file>...            .exe, .msi or .msix files downloaded from that run
 #
 # Run from the repo root, where yubikey-pkcs11.cfg and certchain.pem are linked (gitignored),
 # with JSIGN_JAR pointing at a jsign jar that has a .sha256 file beside it.
@@ -17,7 +17,9 @@
 # jsign on its standard input (--storepass file:/dev/stdin): it is never exported or put on a
 # command line. Afterwards every copy must verify, carry a DigiCert timestamp, be signed by
 # Diridium Technologies, Inc. (test runs: by the test certificate), and be the original plus a
-# signature and nothing else (scripts/compare-signed.py).
+# signature and nothing else (scripts/compare-signed.py). osslsigncode can't read MSIX, so for a
+# .msix the signature jsign extracts is checked with openssl instead (signer, chain, timestamp);
+# Windows checks it is trusted when the draft is tested (test-windows-installers.yml).
 set -euo pipefail
 [ "$#" -ge 3 ] || { sed -n '2,20p' "$0"; exit 1; }
 EXPECTED=$1; OUT=$2; shift 2
@@ -75,8 +77,29 @@ echo "== checking the signed copies"
 fail=0
 for f in "$@"; do
   s="$OUT/$(basename "$f")"
-  case "$s" in *.msi) kind=msi ;; *) kind=pe ;; esac
+  case "$s" in *.msi) kind=msi ;; *.msix) kind=msix ;; *) kind=pe ;; esac
   report="$s.verify.txt"
+  if [ "$kind" = msix ]; then
+    java -jar "$JSIGN_JAR" extract --format DER "$s" > /dev/null
+    sig="$s.sig"
+    [ -s "$sig" ] || { echo "FAIL $s: no signature to extract"; fail=1; continue; }
+    openssl pkcs7 -inform DER -in "$sig" -print_certs > "$sig.pem" 2> "$report" \
+      || { echo "FAIL $s: the signature isn't readable PKCS#7 (see $report)"; fail=1; continue; }
+    certs=$(grep -c 'BEGIN CERTIFICATE' "$sig.pem" || true)
+    names=$(awk '/BEGIN CERTIFICATE/{c=""} {c=c $0 "\n"} /END CERTIFICATE/{printf "%s", c | "openssl x509 -noout -subject -nameopt multiline"; close("openssl x509 -noout -subject -nameopt multiline")}' "$sig.pem" \
+      | sed -n 's/^ *commonName *= *//p')
+    printf '%s\n' "$names" >> "$report"
+    # Here-strings, not pipes: under pipefail, grep -q quitting early can kill the writer.
+    grep -qxF "$SIGNER" <<< "$names" || { echo "FAIL $s: not signed by $SIGNER"; fail=1; }
+    oids=$(openssl asn1parse -inform DER -in "$sig" 2>/dev/null)
+    { grep -q '1.3.6.1.4.1.311.3.3.1' <<< "$oids" && grep -q 'id-smime-ct-TSTInfo' <<< "$oids"; } \
+      || { echo "FAIL $s: no RFC 3161 timestamp"; fail=1; }
+    if [ -z "${SIGN_TEST_P12:-}" ] && [ "${certs:-0}" -lt 2 ]; then
+      echo "FAIL $s: the signature carries ${certs:-no} certificate(s); needs ours and the intermediate"; fail=1
+    fi
+    python3 -I -B "$HERE/compare-signed.py" msix "$f" "$s" || fail=1
+    continue
+  fi
   if ! osslsigncode verify -in "$s" -CAfile "$CAFILE" -TSA-CAfile /etc/ssl/certs/ca-certificates.crt > "$report" 2>&1; then
     echo "FAIL $s: signature does not verify (see $report)"; fail=1; continue
   fi
@@ -91,5 +114,5 @@ for f in "$@"; do
   python3 -I -B "$HERE/compare-signed.py" "$kind" "$f" "$s" || fail=1
 done
 [ "$fail" -eq 0 ] || { echo "Some signed copies failed the checks; nothing to upload." >&2; exit 1; }
-(cd "$OUT" && shopt -s nullglob && files=(*.exe *.msi) && sha256sum -- "${files[@]}" > SHA256SUMS && cat SHA256SUMS)
+(cd "$OUT" && shopt -s nullglob && files=(*.exe *.msi *.msix) && sha256sum -- "${files[@]}" > SHA256SUMS && cat SHA256SUMS)
 echo "== all ${#signed[@]} signed, verified and unchanged apart from the signature: $OUT"
