@@ -25,3 +25,7 @@ logs
 
 # Claude Code
 CLAUDE.md
+
+# Signing links (scripts/sign-windows.sh, RELEASING.md); never committed
+yubikey-pkcs11.cfg
+certchain.pem
