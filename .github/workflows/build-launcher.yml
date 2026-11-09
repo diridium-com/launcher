@@ -688,9 +688,16 @@ jobs:
           path: build
 
       - name: Install the .deb and the test tools
+        # WebKitWebDriver comes from webkitgtk-webdriver on Ubuntu 26.04 and from
+        # webkit2gtk-driver on 24.04; both install /usr/bin/WebKitWebDriver.
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ./build/Launcher_*_amd64.deb webkit2gtk-driver xvfb dbus imagemagick
+          driver=webkitgtk-webdriver
+          apt-cache show "$driver" > /dev/null 2>&1 || driver=webkit2gtk-driver
+          echo "WebDriver package: $driver"
+          sudo apt-get install -y ./build/Launcher_*_amd64.deb "$driver" xvfb dbus imagemagick
+          command -v WebKitWebDriver
 
       - name: Rust setup, for tauri-driver
         # Same pins as the build job.
