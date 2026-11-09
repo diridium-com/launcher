@@ -131,7 +131,7 @@ def main():
         c.shot(os.path.join(run, "01-before-launch.png"))
         c.click(f"//button[@aria-label='Launch {NAME}']")
         t0 = time.time()
-        last, seen_bar, trusted_at, after_trust, outcome = None, False, None, [], None
+        last, seen_bar, answered_at, after_trust, outcome = None, False, None, [], None
         while outcome is None:
             t = time.time() - t0
             s = c.exec(POLL)
@@ -139,14 +139,14 @@ def main():
             if key != last:
                 say(f"{t:7.2f}  bar={s['bar']} err={s['err']}")
                 last = key
-                if trusted_at is not None:
+                if answered_at is not None:
                     after_trust += s["bar"]
             seen_bar = seen_bar or bool(s["bar"])
-            if s["trust"] and trusted_at is None:
+            if s["trust"] and answered_at is None:
                 say(f"{t:7.2f}  certificate prompt shown; clicking Trust certificate")
                 c.shot(os.path.join(run, "02-trust-prompt.png"))
                 c.click("//button[normalize-space()='Trust certificate']")
-                trusted_at = t
+                answered_at = t
             if s["cont"]:
                 say(f"{t:7.2f}  port-mismatch prompt shown; clicking Continue")
                 c.click("//button[normalize-space()='Continue']")
@@ -159,7 +159,7 @@ def main():
             time.sleep(0.05)
         c.shot(os.path.join(run, "03-after-launch.png"))
         say(f"launch {outcome} after {time.time() - t0:.1f} s")
-        if trusted_at is None:
+        if answered_at is None:
             problems.append("the certificate prompt never appeared for a connection launched for the first time")
         elif not any(m.startswith(MOVED_ON) for m in after_trust):
             problems.append("after the certificate was trusted the status bar never showed the launch moving on "
