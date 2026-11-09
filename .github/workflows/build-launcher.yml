@@ -403,7 +403,7 @@ jobs:
   # never go in it.
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [guard, collect, upgrade]
+    needs: [guard, collect, upgrade, launch]
     # One release job per tag at a time, so two overlapping runs can't both find
     # no draft and create two.
     concurrency:
@@ -614,7 +614,7 @@ jobs:
           $data = Join-Path $env:USERPROFILE '.launcher'
           New-Item -ItemType Directory -Path $data -Force | Out-Null
           $file = Join-Path $data 'launcher-data.json'
-          Set-Content -Path $file -Encoding utf8 -Value '{"11111111-2222-3333-4444-555555555555":{"address":"https://upgrade-test.invalid:8443","heap_size":"512m","id":"11111111-2222-3333-4444-555555555555","java_home":"","java_args":"","name":"upgrade test","username":null,"password":null,"group":"Default","notes":"","donotcache":false,"last_connected":null,"show_console":false,"suppress_port_mismatch":false}}'
+          Set-Content -Path $file -Encoding utf8 -Value '{"11111111-2222-3333-4444-555555555555":{"address":"https://upgrade-test.invalid:8443","heapSize":"512m","id":"11111111-2222-3333-4444-555555555555","javaHome":"","javaArgs":"","name":"upgrade test","username":null,"password":null,"group":"Default","notes":"","donotcache":false,"lastConnected":null,"showConsole":false,"suppressPortMismatch":false}}'
           $before = (Get-FileHash $file).Hash
 
           # 3. This run's installer.
@@ -667,19 +667,100 @@ jobs:
           path: ${{ runner.temp }}/upgrade-evidence/
           if-no-files-found: warn
 
+  # Every run: the real administrator, launched through this run's Linux x64 .deb
+  # against an OIE 4.7.0 engine on the runner (scripts/e2e/real-launch.py). A connection
+  # launched for the first time must ask to trust the engine's certificate, show progress
+  # after the answer (before 2.4.1 it sat on "Connecting..."), finish without an error,
+  # and the engine's event log must show the administrator logging in as admin.
+  launch:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Get this run's Linux x64 build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-linux-x86_64
+          path: build
+
+      - name: Install the .deb and the test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./build/Launcher_*_amd64.deb webkit2gtk-driver xvfb dbus imagemagick
+
+      - name: Rust setup, for tauri-driver
+        # Same pins as the build job.
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # stable, 2026-10-09
+        with:
+          toolchain: 1.99.1
+
+      - name: Install tauri-driver
+        # 2.1.0 (2026-09-26) was at least 14 days old on 2026-11-09.
+        run: cargo install tauri-driver --version 2.1.0 --locked
+
+      - name: Get a JavaFX JDK and OIE 4.7.0
+        # Zulu 17.0.17 with JavaFX (built 2025-10-04, SHA-256 from Azul's metadata) and the
+        # OIE 4.7.0 release tarball (SHA-256 from GitHub's asset digest).
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/jdk.tar.gz" https://cdn.azul.com/zulu/bin/zulu17.62.17-ca-fx-jdk17.0.17-linux_x64.tar.gz
+          echo "1a16f93442ede69d3b1e69d78d0bcf99453971675c7ae147f9a4fe530c9a4fd9  $RUNNER_TEMP/jdk.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/jdk"
+          tar xzf "$RUNNER_TEMP/jdk.tar.gz" -C "$RUNNER_TEMP/jdk" --strip-components=1
+          echo "JAVA_HOME=$RUNNER_TEMP/jdk" >> "$GITHUB_ENV"
+          curl -fsSL -o "$RUNNER_TEMP/oie.tar.gz" https://github.com/OpenIntegrationEngine/engine/releases/download/v4.7.0/oie_unix_4_7_0.tar.gz
+          echo "ab08558873dc6be1e474afaacc46efe94d29c945cd3381c10d0ae548ecb429de  $RUNNER_TEMP/oie.tar.gz" | sha256sum -c -
+
+      - name: Start the engine
+        run: |
+          set -euo pipefail
+          pw="$(openssl rand -hex 16)"
+          echo "::add-mask::$pw"
+          echo "E2E_PASSWORD=$pw" >> "$GITHUB_ENV"
+          bash scripts/e2e/start-engine.sh "$RUNNER_TEMP/oie.tar.gz" "$RUNNER_TEMP/engine" "$pw"
+
+      - name: Launch the administrator through Launcher
+        run: python3 scripts/e2e/real-launch.py /usr/bin/Launcher "$(cat "$RUNNER_TEMP/engine/engine-url.txt")" "$E2E_PASSWORD" "$RUNNER_TEMP/launch"
+
+      - name: Stop the engine
+        if: always()
+        run: bash scripts/e2e/stop.sh "$RUNNER_TEMP/engine/engine.pid"
+
+      - name: Keep the evidence
+        # The status log, screenshots, events and logs; not the run's HOME, which holds
+        # the downloaded administrator and the connection file with the test password.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launch-evidence
+          path: |
+            ${{ runner.temp }}/launch/*.log
+            ${{ runner.temp }}/launch/*.png
+            ${{ runner.temp }}/launch/events.json
+            ${{ runner.temp }}/launch/display/*.log
+            ${{ runner.temp }}/launch/home/.launcher/logs/
+            ${{ runner.temp }}/engine/oie/logs/
+          if-no-files-found: warn
+          retention-days: 7
+
   # Aggregating gate: one stable check to mark as required in branch protection.
-  # Green only if the guard, every build, the file check and the upgrade test
-  # succeeded. The release job runs only on tag pushes, so it isn't part of the gate.
+  # Green only if the guard, every build, the file check, the upgrade test and the
+  # real launch succeeded. The release job runs only on tag pushes, so it isn't part
+  # of the gate.
   ci-success:
     name: ci-success
-    needs: [guard, build, collect, upgrade]
+    needs: [guard, build, collect, upgrade, launch]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the guard, the builds, the file check and the upgrade test succeeded
+      - name: Verify the guard, the builds, the file check, the upgrade test and the real launch succeeded
         run: |
-          if [ "${{ needs.guard.result }}" != "success" ] || [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.collect.result }}" != "success" ] || [ "${{ needs.upgrade.result }}" != "success" ]; then
-            echo "Guard: ${{ needs.guard.result }}, builds: ${{ needs.build.result }}, file check: ${{ needs.collect.result }}, upgrade: ${{ needs.upgrade.result }}"
+          if [ "${{ needs.guard.result }}" != "success" ] || [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.collect.result }}" != "success" ] || [ "${{ needs.upgrade.result }}" != "success" ] || [ "${{ needs.launch.result }}" != "success" ]; then
+            echo "Guard: ${{ needs.guard.result }}, builds: ${{ needs.build.result }}, file check: ${{ needs.collect.result }}, upgrade: ${{ needs.upgrade.result }}, launch: ${{ needs.launch.result }}"
             exit 1
           fi
-          echo "Guard, builds, file check and upgrade test succeeded."
+          echo "Guard, builds, file check, upgrade test and real launch succeeded."
