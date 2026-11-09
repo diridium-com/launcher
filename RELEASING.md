@@ -4,7 +4,8 @@ Releases are cut by pushing a version tag. The CI workflow
 (`.github/workflows/build-launcher.yml`) builds all platforms on every push, with
 a read-only token. Only when a `v*` tag is pushed does a separate `release` job,
 the only one that can write, create a **draft** GitHub release from the checked
-build files. Merging to `master` does not release.
+build files. Merging to `master` does not release. The Windows files are signed
+before the draft is published (steps 6 to 9, and "Windows signing" below).
 
 ## Steps
 
@@ -48,10 +49,83 @@ build files. Merging to `master` does not release.
    `guard` job fails, which also refuses a tag whose release is already
    published.
 
-5. CI builds every platform, checks that the builds produced exactly the files a
-   release carries, and the `release` job creates a **draft** release `vX.Y.Z`
-   whose notes are a table of those files. Review the files on the GitHub
-   Releases page, write the release notes above the table, then **Publish** it.
+5. CI builds every platform, checks that the builds produced exactly the 12
+   files a release gets from them (the MSIX packages come from step 7), and the
+   `release` job creates a **draft** release `vX.Y.Z` with the 8 macOS and Linux
+   files. The Windows files are signed first (steps 6 to 9). The Windows runners
+   also upload `sign-inputs-*`, three files per architecture: two copies of
+   `Launcher.exe`, one marked for each installer type, each checked against the
+   exe inside that run's own unsigned installer, and the NSIS uninstaller,
+   checked against the `uninstall.exe` inside that run's setup.exe.
+
+6. **Sign the `Launcher.exe` copies and the uninstallers.** In the owner's
+   remotekey session, from the repo root, with `yubikey-pkcs11.cfg` and
+   `certchain.pem` linked in (both gitignored) and `JSIGN_JAR` pointing at a
+   jsign jar with a `.sha256` beside it:
+
+   ```
+   RUN=<run id of the tag's build>
+   scripts/ci-hashes.sh "$RUN" > sign-inputs.sha256
+   gh run download "$RUN" -p 'sign-inputs-*' -D sign-inputs
+   scripts/sign-windows.sh sign-inputs.sha256 signed-exes sign-inputs/*/*.exe
+   gh release upload vX.Y.Z signed-exes/*.exe
+   ```
+
+   `sign-windows.sh` signs nothing unless every file's SHA-256 matches the run's
+   log, asks for the PIN once, and then checks each signed copy: it verifies,
+   carries a DigiCert timestamp and SSL.com's intermediate, is signed by
+   Diridium Technologies, Inc., and is the original plus a signature and nothing
+   else. The six files stay in the draft only until step 8.
+
+7. **Build the Windows installers and MSIX packages from the signed files:**
+
+   ```
+   gh workflow run windows-installers.yml -f tag=vX.Y.Z
+   ```
+
+   It builds each installer with `tauri bundle --no-binary-patching`, so the
+   signed exe goes in unchanged. While makensis builds setup.exe, the signed
+   uninstaller replaces the one it built, which is accepted only if the signed
+   copy is that uninstaller plus a signature. `scripts/pack-msix.ps1` packs the
+   MSIX around the signed NSIS-marked exe. The workflow checks the signed files
+   inside each result and uploads all six as `windows-installers-*`.
+
+8. **Sign the installers and packages**, in a remotekey session as in step 6:
+
+   ```
+   RUN2=<run id of windows-installers.yml>
+   scripts/ci-hashes.sh "$RUN2" > installers.sha256
+   gh run download "$RUN2" -p 'windows-installers-*' -D installers
+   scripts/check-installers.sh installers signed-exes
+   scripts/sign-windows.sh installers.sha256 signed-installers installers/*/*
+   gh release upload vX.Y.Z signed-installers/*.exe signed-installers/*.msi signed-installers/*.msix
+   ```
+
+   Then take step 6's files out of the draft:
+
+   ```
+   gh release delete-asset vX.Y.Z Launcher_X.Y.Z_x64-nsis.exe -y
+   gh release delete-asset vX.Y.Z Launcher_X.Y.Z_x64-msi.exe -y
+   gh release delete-asset vX.Y.Z Launcher_X.Y.Z_x64-uninstall.exe -y
+   gh release delete-asset vX.Y.Z Launcher_X.Y.Z_arm64-nsis.exe -y
+   gh release delete-asset vX.Y.Z Launcher_X.Y.Z_arm64-msi.exe -y
+   gh release delete-asset vX.Y.Z Launcher_X.Y.Z_arm64-uninstall.exe -y
+   ```
+
+9. **Test the draft's Windows installers:**
+
+   ```
+   gh workflow run test-windows-installers.yml -f tag=vX.Y.Z
+   ```
+
+   On a fresh runner for each architecture and file type (setup.exe, MSI,
+   MSIX), it checks the file's signature, installs it silently, checks the
+   installed `Launcher.exe` (and setup.exe's `uninstall.exe`) is signed and
+   identical to the one inside it, starts it, and uninstalls. Every signature
+   must be Valid on a stock Windows.
+
+10. Review the draft: exactly the 14 release files, no temporary exes. Write the
+    release notes above the file table, then **Publish** it.
 
 ## Notes
 
@@ -64,3 +138,50 @@ build files. Merging to `master` does not release.
   has it yet: delete the draft and the tag, fix, and tag the same version again.
   Only the repository owner can create, move or delete `v*` tags. A clone that
   already fetched the old tag needs `git fetch --tags --force`.
+
+## Windows signing
+
+- Every file a release ships is built by GitHub Actions from the tag. Signing
+  adds an Authenticode signature to what CI built and changes nothing else, and
+  `scripts/compare-signed.py` checks exactly that for every signed file. The key
+  is a hardware key on the owner's machine, used over a forwarded session for
+  the length of a signing step. It is never in CI, and no build runs where it is.
+- Why two CI runs: Tauri writes the installer type into `Launcher.exe` while it
+  builds each installer (tauri-bundler, `bundle.rs`, `patch_binary`), so the exe
+  must be signed after that mark and before the installer is built around it.
+  `scripts/patch-bundle-type.py` makes the same mark Tauri makes, and CI checks
+  its output byte for byte against the exe inside Tauri's own installers.
+- The uninstaller setup.exe installs (`uninstall.exe`) exists as a file only
+  while makensis runs, which hands it to Tauri's signing command. In CI that
+  command is `scripts/sign-command.ps1`, which never signs: in the tag's build
+  it keeps a copy, which step 6 signs, and in `windows-installers.yml` it
+  swaps the signed copy in. makensis builds the same uninstaller in both runs
+  and on both architectures (measured 2026-11-08 with tauri-cli 2.12.4 and
+  makensis 3.13), and the swap refuses a signed copy of any other uninstaller.
+- Not signed: the NSIS plugin DLLs that setup.exe and the uninstaller unpack
+  while they run. The uninstaller carries copies of two of them, so signing
+  them would take a third CI run and signing session; and Tauri never hands one
+  of them, LangDLL.dll, to the signing command. `Launcher.exe`, the
+  uninstaller and all six Windows release files are signed.
+- The MSIX is packed by `scripts/pack-msix.ps1` with makeappx from Microsoft's
+  NuGet package Microsoft.Windows.SDK.BuildTools, checked against NuGet's
+  SHA-512. The manifest is `src-tauri/msix/AppxManifest.xml`. Its Publisher
+  must match the signing certificate's subject, so a dry run with a test
+  certificate passes that subject as `msix_publisher`.
+- jsign follows the same 14-day rule as every other dependency.
+- Re-running the tag's build after step 6 refuses to refill the draft while
+  signed Windows files from the earlier run are in it. Delete them and sign the
+  new run's files again.
+- macOS and Linux files are not signed. Their SHA-256s are on the release page.
+
+## Upgrade test
+
+Every build (`upgrade` job) installs the latest published release of
+diridium-com/launcher on fresh x64 and ARM64 Windows runners, then the build's
+own installer over it. Upgrading with the same installer type (setup.exe over
+setup.exe, MSI over MSI) must leave one Launcher at the new version and
+publisher, the saved connections untouched, and the app starting, or the build
+fails. Switching types is only reported, as warnings: Tauri's MSI never removes
+a setup.exe install, and setup.exe only removes an MSI install from the same
+publisher, so either way both versions stay installed. Release notes tell users
+to upgrade with the type they installed, or uninstall first to switch.

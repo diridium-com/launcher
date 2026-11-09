@@ -1,0 +1,175 @@
+name: Windows installers from the signed exes
+
+# Run by hand for a release (RELEASING.md), after the first signing session has put
+# six signed files in the tag's draft, per architecture: Launcher.exe marked for each
+# installer type (NSIS, MSI) and the NSIS uninstaller. Builds the two installers and
+# the MSIX package per architecture from exactly those files: `tauri bundle
+# --no-binary-patching` for the installers, with the signed uninstaller swapped in
+# while makensis builds setup.exe, and scripts/pack-msix.ps1 around the NSIS-marked
+# exe for the MSIX (the mark only matters to Tauri's updater, which the app doesn't
+# use). Checks each signed file inside them is byte-identical to the signed copy,
+# prints the SHA-256s and uploads the six (not yet signed themselves) for the second
+# signing session.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v2.4.1"
+        required: true
+      msix_publisher:
+        description: "Dry runs only: the test certificate's subject, for the MSIX manifest's Publisher. Leave empty for a release."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # The only job that can write, because only a token that can write sees a draft.
+  # It downloads the six signed files and hands them on: no checkout, no build tools.
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the signed exes from the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Not a release tag: $TAG"; exit 1 ;;
+          esac
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != "true" ]; then
+            echo "::error::$TAG has no draft release."
+            exit 1
+          fi
+          V="${TAG#v}"
+          mkdir signed
+          for a in x64 arm64; do
+            for k in nsis msi uninstall; do
+              gh release download "$TAG" -p "Launcher_${V}_${a}-${k}.exe" -D signed
+            done
+          done
+          ls -l signed
+          (cd signed && sha256sum -- *)
+
+      - name: Hand them on
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-exes
+          path: signed/
+          if-no-files-found: error
+
+  # Read-only. Builds each installer from its signed exe and nothing else: the exe
+  # is put where `tauri build` leaves it, and --no-binary-patching makes the bundler
+  # pack it unchanged instead of marking it (tauri-bundler 2.10.4, bundle.rs). For
+  # setup.exe, Tauri's signing command is scripts/sign-command.ps1 in swap mode: it
+  # replaces the uninstaller makensis hands it with the signed copy, only if that
+  # copy is this uninstaller plus a signature, and changes nothing else.
+  bundle:
+    needs: fetch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            arch: x64
+          - platform: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Rust setup
+        # The Tauri CLI reads the Cargo project; nothing is compiled. Same pin as
+        # build-launcher.yml.
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # stable, 2026-10-09
+        with:
+          toolchain: stable
+
+      - name: Node setup
+        # Same pin as build-launcher.yml, for the same reason.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.21.0
+          cache: "npm"
+
+      - name: Install the Tauri CLI from the lockfile
+        run: npm ci --ignore-scripts
+
+      - name: Get the signed exes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-exes
+          path: signed
+
+      - name: Build the installers from them
+        shell: bash
+        env:
+          A: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          V="$(python -c 'import json; print(json.load(open("package.json"))["version"])')"
+          if [ "v$V" != "${{ inputs.tag }}" ]; then
+            echo "::error::The tag says ${{ inputs.tag }}, package.json says $V."
+            exit 1
+          fi
+          bin=src-tauri/target/release/Launcher.exe
+          bundle=src-tauri/target/release/bundle
+          mkdir -p src-tauri/target/release
+          cp "signed/Launcher_${V}_${A}-nsis.exe" "$bin"
+          un="$RUNNER_TEMP/uninstaller"
+          mkdir "$un"
+          cp "signed/Launcher_${V}_${A}-uninstall.exe" "$un/uninstall.exe"
+          python scripts/sign-command-config.py "$RUNNER_TEMP/sign-command.json"
+          SIGN_COMMAND_MODE=swap SIGN_COMMAND_DIR="$un" \
+            npm run tauri bundle -- --bundles nsis --no-binary-patching --config "$RUNNER_TEMP/sign-command.json"
+          if [ ! -f "$un/swapped.txt" ]; then
+            echo "::error::makensis's uninstaller was not replaced by the signed copy"
+            exit 1
+          fi
+          echo "Uninstaller swapped: $(cat "$un/swapped.txt")"
+          cp "signed/Launcher_${V}_${A}-msi.exe" "$bin"
+          npm run tauri bundle -- --bundles msi --no-binary-patching
+          setup="$bundle/nsis/Launcher_${V}_${A}-setup.exe"
+          msi="$bundle/msi/Launcher_${V}_${A}_en-US.msi"
+          # 7-Zip names the files inside an MSI by their WiX ids; Tauri's template gives
+          # the main binary the id "Path" (tauri-bundler, windows/msi/main.wxs).
+          7z x -y -o"$RUNNER_TEMP/in-setup" "$setup" Launcher.exe uninstall.exe > /dev/null
+          7z x -y -o"$RUNNER_TEMP/in-msi" "$msi" Path > /dev/null
+          cmp "$RUNNER_TEMP/in-setup/Launcher.exe" "signed/Launcher_${V}_${A}-nsis.exe"
+          cmp "$RUNNER_TEMP/in-msi/Path" "signed/Launcher_${V}_${A}-msi.exe"
+          cmp "$RUNNER_TEMP/in-setup/uninstall.exe" "signed/Launcher_${V}_${A}-uninstall.exe"
+          echo "Each installer contains exactly the signed files it was built from."
+          mkdir windows-installers
+          cp "$setup" "$msi" windows-installers/
+
+      - name: Pack the MSIX package around the signed exe
+        shell: pwsh
+        env:
+          A: ${{ matrix.arch }}
+          MSIX_PUBLISHER: ${{ inputs.msix_publisher }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $V = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          ./scripts/pack-msix.ps1 -Arch $env:A -Exe (Resolve-Path "signed/Launcher_${V}_$($env:A)-nsis.exe").Path `
+            -Version $V -Out (Resolve-Path windows-installers).Path -Publisher $env:MSIX_PUBLISHER
+
+      - name: List them for the second signing session
+        shell: bash
+        run: (cd windows-installers && ls -l && sha256sum -- *)
+
+      - name: Upload them for the second signing session
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-installers-${{ matrix.arch }}
+          path: windows-installers/
+          if-no-files-found: error

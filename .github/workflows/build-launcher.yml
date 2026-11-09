@@ -243,7 +243,27 @@ jobs:
         # The Tauri CLI from the lockfile, run directly: no token and no
         # third-party action. tauri.conf.json's beforeBuildCommand builds the
         # frontend first.
+        if: runner.os != 'Windows'
         run: npm run tauri build -- ${{ matrix.args }}
+
+      - name: Build the app, keeping a copy of the NSIS uninstaller (Windows only)
+        # As above. A release also signs the uninstaller setup.exe installs
+        # (RELEASING.md), and it exists as a file only while makensis runs:
+        # makensis hands it to Tauri's signing command and then packs it. The
+        # signing command here, scripts/sign-command.ps1 in capture mode, signs
+        # nothing; it keeps a copy of the uninstaller and leaves every file as it is.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/uninstaller"
+          python scripts/sign-command-config.py "$RUNNER_TEMP/sign-command.json"
+          SIGN_COMMAND_MODE=capture SIGN_COMMAND_DIR="$RUNNER_TEMP/uninstaller" \
+            npm run tauri build -- --config "$RUNNER_TEMP/sign-command.json"
+          if [ ! -f "$RUNNER_TEMP/uninstaller/uninstall.exe" ]; then
+            echo "::error::makensis handed no uninstaller to the signing command"
+            exit 1
+          fi
 
       - name: Gather the release files
         # Copies this runner's release files into one flat folder. On macOS it
@@ -273,8 +293,46 @@ jobs:
           path: release-files/
           if-no-files-found: error
 
+      - name: Make the files to sign (Windows only)
+        # A release signs Launcher.exe before its installers are built (RELEASING.md).
+        # Tauri marks the exe with the installer type while building each installer
+        # and puts the unmarked exe back afterwards, so the two copies to sign are
+        # marked here the same way, by scripts/patch-bundle-type.py, and each must be
+        # byte-identical to the exe inside this run's own unsigned installer. The
+        # uninstaller kept during the build is signed with them, and must be the one
+        # inside this run's setup.exe. The SHA-256s printed here are what the signing
+        # session checks the downloads against.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="$(python -c 'import json; print(json.load(open("package.json"))["version"])')"
+          case "$RUNNER_ARCH" in X64) A=x64 ;; ARM64) A=arm64 ;; *) echo "::error::unexpected runner architecture $RUNNER_ARCH"; exit 1 ;; esac
+          mkdir sign-inputs
+          python scripts/patch-bundle-type.py src-tauri/target/release/Launcher.exe "sign-inputs/Launcher_${V}_${A}-nsis.exe" nsis
+          python scripts/patch-bundle-type.py src-tauri/target/release/Launcher.exe "sign-inputs/Launcher_${V}_${A}-msi.exe" msi
+          cp "$RUNNER_TEMP/uninstaller/uninstall.exe" "sign-inputs/Launcher_${V}_${A}-uninstall.exe"
+          # 7-Zip names the files inside an MSI by their WiX ids; Tauri's template gives
+          # the main binary the id "Path" (tauri-bundler, windows/msi/main.wxs).
+          7z x -y -o"$RUNNER_TEMP/in-setup" "release-files/Launcher_${V}_${A}-setup.exe" Launcher.exe uninstall.exe > /dev/null
+          7z x -y -o"$RUNNER_TEMP/in-msi" "release-files/Launcher_${V}_${A}_en-US.msi" Path > /dev/null
+          cmp "$RUNNER_TEMP/in-setup/Launcher.exe" "sign-inputs/Launcher_${V}_${A}-nsis.exe"
+          cmp "$RUNNER_TEMP/in-msi/Path" "sign-inputs/Launcher_${V}_${A}-msi.exe"
+          cmp "$RUNNER_TEMP/in-setup/uninstall.exe" "sign-inputs/Launcher_${V}_${A}-uninstall.exe"
+          echo "All three files match the ones inside this run's installers."
+          (cd sign-inputs && sha256sum -- *)
+
+      - name: Upload the files to sign (Windows only)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sign-inputs-${{ matrix.artifact-name }}
+          path: sign-inputs/
+          if-no-files-found: error
+
   # Every run: gathers the five builds' files and checks they are exactly the
-  # twelve a release carries, so a branch or PR build tests nearly all of the
+  # twelve a release gets from this workflow (its two MSIX packages are made by
+  # windows-installers.yml), so a branch or PR build tests nearly all of the
   # release path. Read-only.
   collect:
     needs: build
@@ -325,9 +383,14 @@ jobs:
   # files and creates the draft release, or refills an existing draft on a
   # re-run: no checkout, no build tools, no third-party action. A human reviews
   # and publishes the draft.
+  #
+  # The draft gets the 8 macOS and Linux files only. The 6 Windows files (two
+  # setup.exe, two MSI, two MSIX) are built from signed exes and signed after this
+  # run, and added to the draft then (RELEASING.md); the unsigned ones built here
+  # never go in it.
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [guard, collect]
+    needs: [guard, collect, upgrade]
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -355,8 +418,10 @@ jobs:
           | \`Launcher_universal.app.tar.gz\` | macOS app bundle (Intel & Apple Silicon) |
           | \`Launcher_${V}_x64-setup.exe\` | Windows x64 installer |
           | \`Launcher_${V}_x64_en-US.msi\` | Windows x64 MSI |
+          | \`Launcher_${V}_x64.msix\` | Windows x64 MSIX package |
           | \`Launcher_${V}_arm64-setup.exe\` | Windows ARM64 installer |
           | \`Launcher_${V}_arm64_en-US.msi\` | Windows ARM64 MSI |
+          | \`Launcher_${V}_arm64.msix\` | Windows ARM64 MSIX package |
           | \`Launcher_${V}_amd64.AppImage\` | Linux x86_64 AppImage |
           | \`Launcher_${V}_amd64.deb\` | Linux x86_64 deb |
           | \`Launcher-${V}-1.x86_64.rpm\` | Linux x86_64 rpm |
@@ -364,6 +429,14 @@ jobs:
           | \`Launcher_${V}_arm64.deb\` | Linux ARM64 deb |
           | \`Launcher-${V}-1.aarch64.rpm\` | Linux ARM64 rpm |
           EOF
+          files=()
+          for f in release-files/*; do
+            case "$f" in *.exe|*.msi) ;; *) files+=("$f") ;; esac
+          done
+          if [ "${#files[@]}" -ne 8 ]; then
+            echo "::error::Expected the 8 macOS and Linux files, found ${#files[@]}: ${files[*]}"
+            exit 1
+          fi
           # This job's token can see drafts, unlike the guard's, so a draft
           # left by an earlier run is refilled rather than duplicated.
           if DRAFT="$(gh release view "$GITHUB_REF_NAME" --json isDraft -q .isDraft 2>&1)"; then
@@ -371,11 +444,19 @@ jobs:
               echo "::error::Release ${GITHUB_REF_NAME} is already published. Its files are never replaced; release a new version."
               exit 1
             fi
-            gh release upload "$GITHUB_REF_NAME" release-files/* --clobber
+            # Windows files in the draft were signed from an earlier run's build,
+            # which this run replaces, so they must not stay beside its files.
+            windows="$(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name | select(endswith(".exe") or endswith(".msi") or endswith(".msix"))')"
+            if [ -n "$windows" ]; then
+              echo "::error::The draft already has Windows files signed from an earlier run. Delete them from the draft, then re-run; this run's files need signing again (RELEASING.md)."
+              echo "$windows"
+              exit 1
+            fi
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
             gh release edit "$GITHUB_REF_NAME" --notes-file "$notes"
             echo "Refilled the existing draft for ${GITHUB_REF_NAME}."
           elif [ "$DRAFT" = "release not found" ]; then
-            gh release create "$GITHUB_REF_NAME" release-files/* --draft --verify-tag \
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --draft --verify-tag \
               --title "Launcher ${GITHUB_REF_NAME}" --notes-file "$notes"
             echo "Created the draft for ${GITHUB_REF_NAME}."
           else
@@ -383,19 +464,191 @@ jobs:
             exit 1
           fi
 
+  # Every run: installs the latest published release on a fresh Windows runner,
+  # then this run's installer over it, and checks what is left. Upgrading with the
+  # same installer type (setup.exe over setup.exe, MSI over MSI) must be clean:
+  # exactly one Launcher in Windows' list of installed apps, at this version and
+  # publisher, one Launcher.exe, the saved connections untouched
+  # (%USERPROFILE%\.launcher\launcher-data.json), and the app starting. Switching
+  # types is reported as warnings only: Tauri's MSI never removes a setup.exe
+  # install, and setup.exe only removes an MSI install from the same publisher
+  # (measured 2026-11-07; RELEASING.md and the 2.4.1 release notes).
+  upgrade:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+        case: [setup-P, setup-S, msi-msi, msi-setupP, setup-msi]
+        include:
+          - { arch: x64, platform: windows-latest, artifact: build-windows-x86_64 }
+          - { arch: arm64, platform: windows-11-arm, artifact: build-windows-arm64 }
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout the bundle settings
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          sparse-checkout: src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+
+      - name: Get this run's installers
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: new
+
+      - name: Get the latest published release's installers
+        # Always the release users have, from the main repository, whichever
+        # repository or fork runs this build.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view -R diridium-com/launcher --json tagName -q .tagName)"
+          echo "Upgrading from $tag"
+          V="${tag#v}"
+          mkdir old
+          gh release download "$tag" -R diridium-com/launcher -D old \
+            -p "Launcher_${V}_${{ matrix.arch }}-setup.exe" -p "Launcher_${V}_${{ matrix.arch }}_en-US.msi"
+
+      - name: Upgrade and check
+        shell: pwsh
+        env:
+          CASE: ${{ matrix.case }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'upgrade-evidence'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $switching = $env:CASE -in 'msi-setupP', 'setup-msi'
+          $problems = New-Object System.Collections.Generic.List[string]
+          function Fail($m) { if ($switching) { Write-Host "::warning::$m" } else { Write-Host "::error::$m" }; $problems.Add($m) }
+          $publisher = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).bundle.publisher
+
+          $oldSetup = (Get-ChildItem old -Filter '*-setup.exe').FullName
+          $oldMsi = (Get-ChildItem old -Filter '*_en-US.msi').FullName
+          $newSetup = (Get-ChildItem new -Filter "*_$($env:ARCH)-setup.exe").FullName
+          $newMsi = (Get-ChildItem new -Filter "*_$($env:ARCH)_en-US.msi").FullName
+          $newVersion = ([regex]'Launcher_([0-9.]+)_').Match((Split-Path $newSetup -Leaf)).Groups[1].Value
+          $from = if ($env:CASE -like 'msi-*') { $oldMsi } else { $oldSetup }
+          Write-Host "case $($env:CASE) on $($env:ARCH): from $(Split-Path $from -Leaf) to $newVersion, publisher '$publisher'"
+
+          function V3($v) { (("$v" -split '[^0-9]+') | Where-Object { $_ } | Select-Object -First 3) -join '.' }
+          function Entries {
+            $roots = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                     'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+            foreach ($r in $roots) {
+              if (-not (Test-Path $r)) { continue }
+              Get-ChildItem $r | ForEach-Object { Get-ItemProperty $_.PSPath } |
+                Where-Object { $_.DisplayName -like 'Launcher*' } |
+                ForEach-Object { [pscustomobject]@{ Key = $_.PSPath -replace '^.*::', ''; Name = $_.DisplayName; Version = $_.DisplayVersion; Publisher = $_.Publisher; Location = $_.InstallLocation } }
+            }
+          }
+          function Exes {
+            foreach ($d in "$env:LOCALAPPDATA\Launcher", "$env:ProgramFiles\Launcher", "${env:ProgramFiles(x86)}\Launcher") {
+              $f = Join-Path $d 'Launcher.exe'
+              if (Test-Path $f) { [pscustomobject]@{ Path = $f; Version = (Get-Item $f).VersionInfo.ProductVersion } }
+            }
+          }
+          function State($label) {
+            Write-Host "===== $label"
+            $e = @(Entries); Write-Host "installed-apps entries: $($e.Count)"; $e | Format-List | Out-String | Write-Host
+            $x = @(Exes); Write-Host "Launcher.exe on disk: $($x.Count)"; $x | Format-Table -AutoSize | Out-String | Write-Host
+            [pscustomobject]@{ Entries = $e; Exes = $x } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out "$($label -replace '[^a-zA-Z0-9.-]', '_').json")
+          }
+          function Screenshot($name) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+              $bmp.Save((Join-Path $out "$name.png"))
+              Write-Host "screenshot saved: $name.png"
+            } catch { Write-Host "no screenshot: $($_.Exception.Message)" }
+          }
+          function Run($label, $file, $arguments) {
+            Write-Host "----- ${label}: $file $arguments"
+            $p = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+            if (-not $p.WaitForExit(300000)) {
+              Fail "$label did not finish within 5 minutes (waiting on a dialog?)"
+              Screenshot ($label -replace '[^a-zA-Z0-9.-]', '_')
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              return -1
+            }
+            Write-Host "$label exit code: $($p.ExitCode)"
+            return $p.ExitCode
+          }
+
+          # 1. The latest published release.
+          if ($env:CASE -like 'msi-*') { $c = Run 'install the release MSI' 'msiexec.exe' @('/i', "`"$oldMsi`"", '/qn', '/l*v', "`"$out\old-msi.log`"") }
+          else { $c = Run 'install the release setup.exe' $oldSetup '/S' }
+          if ($c -ne 0) { Write-Host "::error::installing the published release failed ($c)"; exit 1 }
+          State 'after the published release'
+
+          # 2. A saved connection, as a user would have.
+          $data = Join-Path $env:USERPROFILE '.launcher'
+          New-Item -ItemType Directory -Path $data -Force | Out-Null
+          $file = Join-Path $data 'launcher-data.json'
+          Set-Content -Path $file -Encoding utf8 -Value '{"11111111-2222-3333-4444-555555555555":{"address":"https://upgrade-test.invalid:8443","heap_size":"512m","id":"11111111-2222-3333-4444-555555555555","java_home":"","java_args":"","name":"upgrade test","username":null,"password":null,"group":"Default","notes":"","donotcache":false,"last_connected":null,"show_console":false,"suppress_port_mismatch":false}}'
+          $before = (Get-FileHash $file).Hash
+
+          # 3. This run's installer.
+          switch ($env:CASE) {
+            'setup-P'    { $c = Run 'install this setup.exe /P' $newSetup '/P'; break }
+            'msi-setupP' { $c = Run 'install this setup.exe /P' $newSetup '/P'; break }
+            'setup-S'    { $c = Run 'install this setup.exe /S' $newSetup '/S'; break }
+            default      { $c = Run 'install this MSI' 'msiexec.exe' @('/i', "`"$newMsi`"", '/qn', '/l*v', "`"$out\new-msi.log`""); break }
+          }
+          if ($c -ne 0) { Fail "installing this run's installer returned $c" }
+          Start-Sleep -Seconds 5
+          State 'after this run'
+
+          # 4. The verdict.
+          $entries = @(Entries); $exes = @(Exes)
+          if ($entries.Count -ne 1) { Fail "$($entries.Count) Launcher entries in the installed-apps list, expected 1" }
+          foreach ($e in $entries) {
+            if ((V3 $e.Version) -ne $newVersion) { Fail "an installed-apps entry still says version $($e.Version) ($($e.Key))" }
+            if ($e.Publisher -ne $publisher) { Fail "an installed-apps entry names publisher '$($e.Publisher)' ($($e.Key))" }
+          }
+          if ($exes.Count -ne 1) { Fail "$($exes.Count) Launcher.exe files on disk, expected 1: $(($exes | ForEach-Object Path) -join ', ')" }
+          foreach ($x in $exes) { if ((V3 $x.Version) -ne $newVersion) { Fail "$($x.Path) is version $($x.Version)" } }
+          # The saved connections and a starting app are required in every case.
+          if (-not (Test-Path $file)) { Write-Host "::error::the saved connections file is gone"; $problems.Add('connections'); $switching = $false }
+          elseif ((Get-FileHash $file).Hash -ne $before) { Write-Host "::error::the saved connections file changed"; $problems.Add('connections'); $switching = $false }
+          foreach ($x in $exes | Where-Object { (V3 $_.Version) -eq $newVersion }) {
+            $p = Start-Process -FilePath $x.Path -PassThru
+            Start-Sleep -Seconds 15
+            if ($p.HasExited) { Write-Host "::error::$($x.Path) exited within 15 s ($($p.ExitCode))"; $problems.Add('start'); $switching = $false }
+            else { Write-Host "$($x.Path) is running after 15 s"; Stop-Process -Id $p.Id -Force }
+          }
+
+          if (-not $problems.Count) { Write-Host "Clean upgrade: $($env:CASE) on $($env:ARCH)."; exit 0 }
+          if ($switching) { Write-Host "Switching installer types is not clean ($($problems.Count) warning(s)); known Tauri behaviour, reported only."; exit 0 }
+          Write-Host "NOT A CLEAN UPGRADE: $($problems.Count) problem(s)"; exit 1
+
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: upgrade-evidence-${{ matrix.arch }}-${{ matrix.case }}
+          path: ${{ runner.temp }}/upgrade-evidence/
+          if-no-files-found: warn
+
   # Aggregating gate: one stable check to mark as required in branch protection.
-  # Green only if the guard, every build and the file check succeeded. The
-  # release job runs only on tag pushes, so it isn't part of the gate.
+  # Green only if the guard, every build, the file check and the upgrade test
+  # succeeded. The release job runs only on tag pushes, so it isn't part of the gate.
   ci-success:
     name: ci-success
-    needs: [guard, build, collect]
+    needs: [guard, build, collect, upgrade]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Verify the guard, the builds and the file check succeeded
+      - name: Verify the guard, the builds, the file check and the upgrade test succeeded
         run: |
-          if [ "${{ needs.guard.result }}" != "success" ] || [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.collect.result }}" != "success" ]; then
-            echo "Guard: ${{ needs.guard.result }}, builds: ${{ needs.build.result }}, file check: ${{ needs.collect.result }}"
+          if [ "${{ needs.guard.result }}" != "success" ] || [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.collect.result }}" != "success" ] || [ "${{ needs.upgrade.result }}" != "success" ]; then
+            echo "Guard: ${{ needs.guard.result }}, builds: ${{ needs.build.result }}, file check: ${{ needs.collect.result }}, upgrade: ${{ needs.upgrade.result }}"
             exit 1
           fi
-          echo "Guard, builds and file check succeeded."
+          echo "Guard, builds, file check and upgrade test succeeded."
