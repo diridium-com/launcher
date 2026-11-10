@@ -119,12 +119,24 @@ def main():
 
     problems = []
     display = os.path.join(run, "display")
+    # The test's own API login is a Login by admin too. Take the baseline only once that
+    # event is in the log, so it can't be mistaken for the administrator's later.
+    before_login = time.time() * 1000 - 2000
     engine = Engine(url, password)
-    baseline = max([int(e["id"]) for e in engine.events(0)] or [0])
-    say(f"engine {url}: event log at id {baseline}")
-    subprocess.run(["bash", os.path.join(HERE, "start-display.sh"), display, home], check=True)
+    own = []
+    for _ in range(30):
+        own = [e for e in admin_logins(engine.events(0)) if e.get("dateTime", 0) >= before_login]
+        if own:
+            break
+        time.sleep(1)
+    if not own:
+        say("FAIL the test's own login never appeared in the engine's event log")
+        return 1
+    baseline = max(int(e["id"]) for e in engine.events(0))
+    say(f"engine {url}: the test's own login is event {own[0]['id']}; event log at id {baseline}")
     c = Client(os.path.join(run, "wd-state.json"))
     try:
+        subprocess.run(["bash", os.path.join(HERE, "start-display.sh"), display, home], check=True)
         with open(os.path.join(display, "wd-url.txt"), encoding="utf-8") as f:
             c.new(f.read().strip(), app)
         c.wait(f"//button[@aria-label='Launch {NAME}']", 60)

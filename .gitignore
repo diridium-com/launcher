@@ -30,12 +30,10 @@ CLAUDE.md
 yubikey-pkcs11.cfg
 certchain.pem
 
-# Signing steps' working files (RELEASING.md, steps 6 and 8)
-/sign-inputs/
-/sign-inputs.sha256
-/signed-exes/
-/signed-exes.partial/
-/installers/
-/installers.sha256
-/signed-installers/
-/signed-installers.partial/
+# Signing steps' working files (RELEASING.md, steps 6 and 8), retry folders included
+/sign-inputs*/
+/sign-inputs*.sha256
+/signed-exes*/
+/installers*/
+/installers*.sha256
+/signed-installers*/

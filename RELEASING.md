@@ -81,9 +81,13 @@ job only downloads the draft's files.
    `ci-hashes.sh` refuses a run that isn't the tag's successful build.
    `sign-windows.sh` then signs nothing unless every file's SHA-256 matches the
    run's log, and asks for the PIN once. It checks that each signed copy:
-   - verifies, with a DigiCert timestamp;
+   - has a DigiCert timestamp;
    - is signed by Diridium Technologies, Inc. through SSL.com's intermediate;
    - differs from the original only by the signature.
+
+   It also verifies each signed `.exe` and `.msi` with osslsigncode. An MSIX's
+   signature is read but not verified here; step 9 has Windows verify it. The
+   unsigned copies it kept are in `ci-originals/`, named `<file>.unsigned`.
 
    It works in `signed-exes.partial` and renames that to `signed-exes` only when
    every check passes, so after a failure the upload line finds nothing. Use a
@@ -200,8 +204,8 @@ job only downloads the draft's files.
   new run's files again.
 - macOS and Linux files are not signed. Their SHA-256s are on the release page.
 - The signing steps' working folders (`sign-inputs/`, `signed-exes/`,
-  `installers/`, `signed-installers/`, the `.partial` folders and the two
-  `.sha256` lists) are gitignored.
+  `installers/`, `signed-installers/`, the `.partial` folders, retry folders
+  such as `signed-exes-2/`, and the two `.sha256` lists) are gitignored.
 
 ## Upgrade test
 

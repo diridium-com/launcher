@@ -151,8 +151,9 @@ jobs:
       - name: Install cargo-audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        # 0.22.2 (2026-06-05) was at least 14 days old on 2026-11-09.
         with:
-          tool: cargo-audit
+          tool: cargo-audit@0.22.2
 
       - name: Rust security audit (ubuntu only)
         if: matrix.platform == 'ubuntu-latest'
@@ -654,6 +655,10 @@ jobs:
             if ($p.HasExited) { Write-Host "::error::$($x.Path) exited within 15 s ($($p.ExitCode))"; $problems.Add('start'); $switching = $false }
             else { Write-Host "$($x.Path) is running after 15 s"; Stop-Process -Id $p.Id -Force }
           }
+          # The new version has now started and read the file. Launcher moves a file it can't
+          # parse aside (launcher-data.corrupt-<time>.json) and starts empty, so check again.
+          if (-not (Test-Path $file)) { Write-Host "::error::after the new version started, the saved connections file is gone (moved aside as unreadable?)"; $problems.Add('connections after start'); $switching = $false }
+          elseif ((Get-FileHash $file).Hash -ne $before) { Write-Host "::error::after the new version started, the saved connections file changed"; $problems.Add('connections after start'); $switching = $false }
 
           if (-not $problems.Count) { Write-Host "Clean upgrade: $($env:CASE) on $($env:ARCH)."; exit 0 }
           if ($switching) { Write-Host "Switching installer types is not clean ($($problems.Count) warning(s)); known Tauri behaviour, reported only."; exit 0 }
@@ -751,6 +756,7 @@ jobs:
             ${{ runner.temp }}/launch/display/*.log
             ${{ runner.temp }}/launch/home/.launcher/logs/
             ${{ runner.temp }}/engine/oie/logs/
+            ${{ runner.temp }}/engine/oieserver.out
           if-no-files-found: warn
           retention-days: 7
 

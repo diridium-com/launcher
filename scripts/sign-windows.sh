@@ -13,15 +13,17 @@
 # Test without the YubiKey: SIGN_TEST_P12=<PKCS#12 file> (alias "test") and SIGN_TEST_P12_PASS;
 # the keystore password is asked for in place of the PIN.
 #
-# The files are copied into <output>.partial/ci-originals and nothing is signed unless every
-# copy's SHA-256 matches CI's list. jsign signs second copies, all in one call, so the PIN is
-# typed once. The PIN goes to jsign on its standard input (--storepass file:/dev/stdin): it is
-# never exported or put on a command line. Afterwards every signed copy must verify, carry a
-# DigiCert timestamp, be signed by Diridium Technologies, Inc. through SSL.com's intermediate
-# (test runs: by the test certificate), and be the original plus a signature and nothing else
-# (scripts/compare-signed.py). osslsigncode can't read MSIX, so for a .msix the signature jsign
-# extracts is checked with openssl instead; Windows checks it is trusted when the draft is
-# tested (test-windows-installers.yml). Only when every check passes is <output>.partial renamed
+# The files are copied into <output>.partial/ci-originals (named <file>.unsigned, so nothing
+# there carries a release file's name) and nothing is signed unless every copy's SHA-256
+# matches CI's list. jsign signs second copies, all in one call, so the PIN is typed once. The
+# PIN goes to jsign on its standard input (--storepass file:/dev/stdin): it is never exported or
+# put on a command line. Afterwards every signed .exe and .msi must verify (osslsigncode), and
+# every signed file must carry a DigiCert timestamp, be signed by Diridium Technologies, Inc.
+# through SSL.com's intermediate (test runs: by the test certificate), and be the original plus
+# a signature and nothing else (scripts/compare-signed.py). osslsigncode can't read MSIX, so for
+# a .msix the signer, its issuer and the timestamp are read from the signature jsign extracts,
+# without verifying it here; Windows verifies it when the draft is tested
+# (test-windows-installers.yml). Only when every check passes is <output>.partial renamed
 # to <output>, so a failed run leaves nothing where the upload step looks.
 set -euo pipefail
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
@@ -59,6 +61,7 @@ if [ -n "${SIGN_TEST_P12:-}" ]; then
     | openssl x509 -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p') || SIGNER=
   [ -n "$SIGNER" ] || { echo "set SIGN_TEST_P12_PASS so the test certificate's name can be read" >&2; exit 1; }
   CAFILE=$(mktemp)
+  trap 'rm -f -- "$CAFILE"' EXIT
   openssl pkcs12 -in "$SIGN_TEST_P12" -nokeys -passin env:SIGN_TEST_P12_PASS 2> /dev/null > "$CAFILE"
   cat /etc/ssl/certs/ca-certificates.crt >> "$CAFILE"
   PROMPT="Test keystore password: "
@@ -72,12 +75,15 @@ else
   PROMPT="YubiKey PIN: "
 fi
 
+dups=$(for f in "$@"; do basename "$f"; done | sort | uniq -d)
+[ -z "$dups" ] || { echo "the same file name is given more than once: $dups" >&2; exit 1; }
+
 echo "== copying the files and checking every copy against CI's list"
 mkdir "$PART" "$PART/ci-originals"
 signed=()
 for f in "$@"; do
   name=$(basename "$f")
-  copy="$PART/ci-originals/$name"
+  copy="$PART/ci-originals/$name.unsigned"
   cp "$f" "$copy"
   want=$(awk -v n="$name" '{ sub(/^\*/, "", $2) } $2 == n { print $1 }' "$EXPECTED")
   [ "$(printf '%s\n' "$want" | grep -c .)" -eq 1 ] \
@@ -112,7 +118,7 @@ report_line() {  # $1 report, $2 section heading (regex), $3 label (regex)
 echo "== checking the signed copies"
 fail=0
 for s in "${signed[@]}"; do
-  orig="$PART/ci-originals/$(basename "$s")"
+  orig="$PART/ci-originals/$(basename "$s").unsigned"
   case "$s" in *.msi) kind=msi ;; *.msix) kind=msix ;; *) kind=pe ;; esac
   report="$s.verify.txt"
   if [ "$kind" = msix ]; then
@@ -167,5 +173,6 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 (cd "$PART" && shopt -s nullglob && files=(*.exe *.msi *.msix) && sha256sum -- "${files[@]}" > SHA256SUMS && cat SHA256SUMS)
-mv "$PART" "$OUT"
+# -T: fail instead of moving the folder inside <output>, should that have appeared meanwhile.
+mv -T "$PART" "$OUT"
 echo "== all ${#signed[@]} signed, verified and unchanged apart from the signature: $OUT"

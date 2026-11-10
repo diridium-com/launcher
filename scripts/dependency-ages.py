@@ -10,19 +10,23 @@ the publish date of every version that is new at the second ref:
   - npm packages in package-lock.json (registry.npmjs.org)
   - Rust crates in src-tauri/Cargo.lock (crates.io, one request a second as its
     crawler policy asks)
-  - GitHub actions pinned by commit SHA in .github/workflows: the publish date of
-    the GitHub release named in the pin's comment (`@<sha> # v1.2.3`), after
-    checking the SHA is that tag's commit; without such a release, the commit's
-    date, with a warning (a committer can set that date). Set GH_TOKEN for a
-    higher API rate limit
+  - GitHub actions pinned by commit SHA in .github/workflows: the later of the
+    commit's date and the publish date of the GitHub release named in the pin's
+    comment (`@<sha> # v1.2.3`), after checking the SHA is that tag's commit. A
+    commit more than a day newer than its release is an error: the tag was moved
+    after the release, which is what a hijacked account does. Without such a
+    release, the commit's date, with a warning (a committer can set that date).
+    Set GH_TOKEN for a higher API rate limit
   - exact node-version values in .github/workflows (nodejs.org's release index)
   - exact Rust toolchain values in .github/workflows (static.rust-lang.org's
     release manifest)
   - jsign, pinned in scripts/sign-windows.sh (the jar's upload to Maven Central)
   - Microsoft.Windows.SDK.BuildTools, pinned in scripts/pack-msix.ps1 (NuGet)
 
-Not covered: the NSIS and WiX that the Tauri CLI downloads; their versions are
-fixed by the CLI's own version, which the npm check covers.
+Not covered: the NSIS and WiX that the Tauri CLI downloads (their versions are
+fixed by the CLI's own version, which the npm check covers), and the launch job's
+test tools in build-launcher.yml (tauri-driver, the Zulu JDK, the OIE tarball)
+and cargo-audit, which are pinned and dated in the comments beside them.
 
 Read-only: git and HTTPS GETs, nothing else. Run from the repo root:
 
@@ -78,7 +82,10 @@ def github(path):
 
 
 def when(text):
-    return dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    text = text.replace("Z", "+00:00")
+    # Python 3.10's fromisoformat takes only 3 or 6 digits of fractional seconds.
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
+    return dt.datetime.fromisoformat(text)
 
 
 # --- what each ref pins -------------------------------------------------------
@@ -190,7 +197,11 @@ def action_date(item):
             tag_sha = github(f"repos/{repo}/commits/{urllib.parse.quote(tag)}")["sha"]
             if tag_sha != sha:
                 raise ValueError(f"pinned {sha} is not {tag}, which is {tag_sha}")
-            return release["published_at"]
+            committed = github(f"repos/{repo}/commits/{sha}")["commit"]["committer"]["date"]
+            if when(committed) > when(release["published_at"]) + dt.timedelta(days=1):
+                raise ValueError(f"{tag}'s commit is dated {committed}, after its release "
+                                 f"({release['published_at']}): was the tag moved?")
+            return max(committed, release["published_at"], key=when)
     WARNINGS.append(f"action {repo} {sha}: no GitHub release for '{tag}', dated by its commit date")
     return github(f"repos/{repo}/commits/{sha}")["commit"]["committer"]["date"]
 
