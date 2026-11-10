@@ -199,6 +199,9 @@ jobs:
         #     GHSA-86w9-cpqp-85rv  (2026-10-23, no fixed release then)
         #     GHSA-5x38-2vff-x55p, GHSA-7wch-p9px-956x, GHSA-8hrf-8g6f-7xwp,
         #     GHSA-hqq3-7jhf-c5jx, GHSA-jc66-7q78-782g  (2026-11-05)
+        #     GHSA-6qrw-m8cv-hcxf, GHSA-rhr8-3pm8-cq29  (2026-11-10; fixed in
+        #     node-forge 1.4.1 of 2026-10-27; the lockfile still has the 1.4.0
+        #     checked above)
         #   seroval, via @nuxt/vite-builder, which writes the build manifest:
         #     GHSA-7rv5-mrxv-xcr9, GHSA-97r2-qh9m-474h, GHSA-wp97-x4hv-qvhp
         #     (2026-11-05)
@@ -212,6 +215,8 @@ jobs:
             GHSA-8hrf-8g6f-7xwp
             GHSA-hqq3-7jhf-c5jx
             GHSA-jc66-7q78-782g
+            GHSA-6qrw-m8cv-hcxf
+            GHSA-rhr8-3pm8-cq29
             GHSA-7rv5-mrxv-xcr9
             GHSA-97r2-qh9m-474h
             GHSA-wp97-x4hv-qvhp
